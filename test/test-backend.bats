@@ -162,6 +162,26 @@ FAKE_CURL
   [ "$prepare_line" -lt "$rspec_line" ]
 }
 
+@test "test-backend accepts a running Postgres without a healthcheck" {
+  make_fake_docker no-healthcheck
+
+  run env WTL_POSTGRES_READINESS_TIMEOUT=3 bash "$BATS_TEST_DIRNAME/../libexec/test-backend"
+  [ "$status" -eq 0 ]
+  grep -q '^inspect:no-healthcheck$' "$EVENTS_FILE"
+  grep -q '^db:prepare$' "$EVENTS_FILE"
+  grep -q '^rspec$' "$EVENTS_FILE"
+}
+
+@test "test-backend waits through a pending Postgres healthcheck" {
+  make_fake_docker healthcheck-pending healthcheck-pending healthy
+
+  run env WTL_POSTGRES_READINESS_TIMEOUT=5 bash "$BATS_TEST_DIRNAME/../libexec/test-backend"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^inspect:healthcheck-pending$' "$EVENTS_FILE")" -ge 2 ]
+  grep -q '^inspect:healthy$' "$EVENTS_FILE"
+  grep -q '^db:prepare$' "$EVENTS_FILE"
+}
+
 @test "test-backend shared mode checks the shared Postgres project before db:prepare" {
   printf 'LOCALS_INFRA_MODE=shared\n' >> worktree.config
   make_fake_docker healthy
