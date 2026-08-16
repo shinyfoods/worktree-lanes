@@ -33,7 +33,7 @@ wtl_wait_for_postgres_ready() {
   for attempt in $(seq 1 "$timeout"); do
     cid="$(docker compose -p "$project" -f "$compose_file" ps -q "$service" 2>/dev/null || true)"
     if [ -n "$cid" ]; then
-      status_line="$(docker inspect --format '{{if .Config.Healthcheck}}{{if .State.Health}}{{.State.Health.Status}}{{else}}healthcheck-pending{{end}}|healthcheck{{else}}no-healthcheck|{{.State.Status}}{{end}}' "$cid" 2>/dev/null || true)"
+      status_line="$(docker inspect --format '{{if .Config.Healthcheck}}{{if .State.Health}}{{.State.Health.Status}}{{else}}healthcheck-pending{{end}}|{{.State.Status}}{{else}}no-healthcheck|{{.State.Status}}{{end}}' "$cid" 2>/dev/null || true)"
       if [[ "$status_line" == *"|"* ]]; then
         health_state="${status_line%%|*}"
         container_state="${status_line#*|}"

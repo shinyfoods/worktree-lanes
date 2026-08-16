@@ -39,16 +39,20 @@ record_event() {
 if [ "${1:-}" = "inspect" ]; then
   next_index=$(( $(cat "$WTL_FAKE_DOCKER_HEALTH_INDEX") + 1 ))
   printf '%s\n' "$next_index" > "$WTL_FAKE_DOCKER_HEALTH_INDEX"
-  health="$(sed -n "${next_index}p" "$WTL_FAKE_DOCKER_HEALTH" || true)"
-  if [ -z "$health" ]; then
-    health="$(tail -n 1 "$WTL_FAKE_DOCKER_HEALTH")"
+  raw_health="$(sed -n "${next_index}p" "$WTL_FAKE_DOCKER_HEALTH" || true)"
+  if [ -z "$raw_health" ]; then
+    raw_health="$(tail -n 1 "$WTL_FAKE_DOCKER_HEALTH")"
+  fi
+  if [[ "$raw_health" == *"|"* ]]; then
+    health="${raw_health%%|*}"
+    container="${raw_health#*|}"
+  else
+    health="$raw_health"
+    container="running"
   fi
   record_event "inspect:$health"
-  if [[ "$*" == *"|healthcheck"* ]]; then
-    case "$health" in
-      no-healthcheck) printf 'no-healthcheck|running\n' ;;
-      *) printf '%s|running\n' "$health" ;;
-    esac
+  if [[ "$*" == *"|{{.State.Status}}"* ]]; then
+    printf '%s|%s\n' "$health" "$container"
   else
     printf '%s\n' "$health"
   fi
@@ -158,6 +162,26 @@ FAKE_CURL
   [ "$prepare_line" -lt "$rspec_line" ]
 }
 
+@test "test-backend accepts a running Postgres without a healthcheck" {
+  make_fake_docker no-healthcheck
+
+  run env WTL_POSTGRES_READINESS_TIMEOUT=3 bash "$BATS_TEST_DIRNAME/../libexec/test-backend"
+  [ "$status" -eq 0 ]
+  grep -q '^inspect:no-healthcheck$' "$EVENTS_FILE"
+  grep -q '^db:prepare$' "$EVENTS_FILE"
+  grep -q '^rspec$' "$EVENTS_FILE"
+}
+
+@test "test-backend waits through a pending Postgres healthcheck" {
+  make_fake_docker healthcheck-pending healthcheck-pending healthy
+
+  run env WTL_POSTGRES_READINESS_TIMEOUT=5 bash "$BATS_TEST_DIRNAME/../libexec/test-backend"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^inspect:healthcheck-pending$' "$EVENTS_FILE")" -ge 2 ]
+  grep -q '^inspect:healthy$' "$EVENTS_FILE"
+  grep -q '^db:prepare$' "$EVENTS_FILE"
+}
+
 @test "test-backend shared mode checks the shared Postgres project before db:prepare" {
   printf 'LOCALS_INFRA_MODE=shared\n' >> worktree.config
   make_fake_docker healthy
@@ -180,5 +204,14 @@ FAKE_CURL
   [[ "$output" == *"service 'postgres'"* ]]
   [[ "$output" == *"Recent logs for service 'postgres'"* ]]
   [[ "$output" == *"fake postgres diagnostics"* ]]
+  ! grep -q '^db:prepare$' "$EVENTS_FILE"
+}
+
+@test "test-backend rejects a healthy status from a stopped Postgres container" {
+  make_fake_docker 'healthy|exited'
+
+  run env WTL_POSTGRES_READINESS_TIMEOUT=2 bash "$BATS_TEST_DIRNAME/../libexec/test-backend"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"last health=healthy, container=exited"* ]]
   ! grep -q '^db:prepare$' "$EVENTS_FILE"
 }
