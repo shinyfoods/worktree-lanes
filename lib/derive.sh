@@ -2,6 +2,8 @@
 # shellcheck disable=SC2034  # WTL_* output vars are consumed by emit.sh and callers
 
 # wtl_getvar VAR_NAME — portable indirect variable lookup (works on bash 3.2+)
+# Intentional eval: the caller supplies a validated shell identifier, and this
+# performs an indirect variable read rather than evaluating generated env output.
 wtl_getvar() {
   eval "printf '%s' \"\${${1}:-}\""
 }
@@ -27,9 +29,8 @@ wtl_id_for_path() {
 # under concurrent git activity (index.lock contention when several worktrees
 # or agents touch the repo at once). Retries a few times with a short backoff;
 # prints stdout on the first success. Returns non-zero only if every attempt
-# fails, so callers can surface a clear error instead of an empty value — which
-# otherwise dies three lines later as a cryptic "unbound variable" once the
-# empty `worktree env` output is eval'd by a consumer running under `set -u`.
+# fails, so callers can surface a clear error instead of handing an empty dump
+# to the guarded environment loader.
 wtl_git_retry() {
   local attempt out
   for attempt in 1 2 3 4 5; do

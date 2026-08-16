@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-eval "$(worktree env --shell)"
+# shellcheck disable=SC1091,SC2119  # loader is sourced from the installed CLI root and intentionally receives no caller args
+. "$WTL_ROOT/lib/env.sh"
+# shellcheck disable=SC2119  # service arguments are not env-loader arguments
+wtl_load_env
 
 if [ "${WTL_HAS_FRONTEND:-0}" = "0" ]; then
   echo "worktree stop-frontend: frontend is not configured for this project (WTL_HAS_FRONTEND=0)" >&2

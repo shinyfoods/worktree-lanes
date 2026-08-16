@@ -1,5 +1,7 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2034  # WTL_CI_RETRYABLE_ERROR_PATTERN is consumed by callers via the functions below
+# shellcheck disable=SC1091,SC2119  # loader is sourced from the installed CLI root and intentionally receives no caller args
+. "$WTL_ROOT/lib/env.sh"
 
 # Docker/Compose startup failure signatures safe to retry with a fresh CI lane
 # suffix. Extracted from libexec/test-backend's original compose_up_isolated_with_retry
@@ -41,12 +43,19 @@ wtl_compose_up_with_ci_retry() {
   local base_suffix="${WTL_CI_LANE_SUFFIX:-}"
   local attempt=1
   local janitor_ran=0
+  local env_status
 
   while [ "$attempt" -le "$max_attempts" ]; do
     if [ "$attempt" -gt 1 ] && [ "${GITHUB_ACTIONS:-}" = "true" ]; then
       WTL_CI_LANE_SUFFIX="${base_suffix:-$base_label}-r$((attempt - 1))"
       export WTL_CI_LANE_SUFFIX
-      eval "$(worktree env --shell)"
+      # shellcheck disable=SC2119  # caller arguments are not env-loader arguments
+      if wtl_load_env; then
+        :
+      else
+        env_status=$?
+        return "$env_status"
+      fi
     fi
 
     local up_log; up_log="$(mktemp)"

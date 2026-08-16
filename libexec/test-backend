@@ -11,8 +11,8 @@ set -euo pipefail
 # shellcheck source=../lib/ci_postgres_readiness.sh
 . "$WTL_ROOT/lib/ci_postgres_readiness.sh"
 
-eval "$(worktree env --shell)"
-# COMPOSE_PROJECT_NAME and COMPOSE_FILE are set directly by worktree env --shell
+wtl_load_env
+# COMPOSE_PROJECT_NAME and COMPOSE_FILE are set directly by the guarded env loader.
 
 cleanup_compose_on_exit() {
   if [ "${GITHUB_ACTIONS:-}" = "true" ] && [ "${WTL_INFRA_MODE:-isolated}" != "shared" ]; then

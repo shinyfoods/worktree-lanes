@@ -59,6 +59,8 @@ NPM_LOCK="/tmp/${_WTL_PROJECT:-wtl}-npm-install.lock"
 if command -v flock >/dev/null 2>&1; then
   npm_install() { flock -w 300 "$NPM_LOCK" bash -c "$1"; }
 else
+  # Intentional configured-command evaluation: install_cmd is supplied by this
+  # script's fixed link_or_install call sites, not by a generated env dump.
   npm_install() { eval "$1"; }
 fi
 

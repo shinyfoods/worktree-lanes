@@ -12,11 +12,13 @@ ARTIFACTS_DIR="${WTL_VALIDATE_ARTIFACTS_DIR:-}"
 VALIDATE_LOCK_DIR="${WTL_VALIDATE_LOCK_DIR:-/tmp/${WTL_PROJECT:-wtl}-validate-parallel.lock}"
 VALIDATE_LOCK_ACQUIRED=0
 
-# Source config early to get WTL_PROJECT for lock path before full env eval.
+# Source config early to get WTL_PROJECT for the lock path before loading the full env.
 # Use lib/config.sh:wtl_find_config — single source of truth for config discovery.
 _WTL_ROOT_VP="${WTL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # shellcheck source=../lib/config.sh
 . "$_WTL_ROOT_VP/lib/config.sh"
+# shellcheck disable=SC1091  # sourced from the installed CLI root
+. "$_WTL_ROOT_VP/lib/env.sh"
 if cfg=$(wtl_find_config 2>/dev/null); then
   # shellcheck disable=SC1090
   . "$cfg"
@@ -48,7 +50,7 @@ SHARED_INFRA_WAS_RUNNING=0
 # Use a subshell so --infra-mode=shared does not pollute the outer env with
 # GOTOGETHER_INFRA_MODE=shared (which would cause the backend-test step to
 # use shared infra instead of isolated, triggering port conflicts).
-if (eval "$(worktree env --shell --infra-mode=shared)" &&     docker compose -p "$WTL_SHARED_INFRA_PROJECT_NAME" -f "$COMPOSE_FILE" ps -q 2>/dev/null | grep -q .) 2>/dev/null; then
+if (wtl_load_env --infra-mode=shared &&     docker compose -p "$WTL_SHARED_INFRA_PROJECT_NAME" -f "$COMPOSE_FILE" ps -q 2>/dev/null | grep -q .); then
   SHARED_INFRA_WAS_RUNNING=1
 fi
 if [ "${WTL_VALIDATE_ALLOW_DIRTY:-0}" != "1" ] && [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
@@ -191,13 +193,13 @@ capture_lane_context() {
 
   (
     cd "$wt"
-    eval "$(worktree env --shell --infra-mode=isolated)"
+    wtl_load_env --infra-mode=isolated
     docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" ps
   ) >"${prefix}-compose-ps.log" 2>&1 || true
 
   (
     cd "$wt"
-    eval "$(worktree env --shell --infra-mode=isolated)"
+    wtl_load_env --infra-mode=isolated
     docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" logs --no-color --tail=200
   ) >"${prefix}-compose-logs.log" 2>&1 || true
 }
@@ -207,13 +209,13 @@ capture_shared_infra_context() {
   local prefix="$LOG_DIR/shared-${step}"
   (
     cd "$ROOT"
-    eval "$(worktree env --shell --infra-mode=shared)"
+    wtl_load_env --infra-mode=shared
     docker compose -p "$WTL_SHARED_INFRA_PROJECT_NAME" -f "$COMPOSE_FILE" ps
   ) >"${prefix}-compose-ps.log" 2>&1 || true
 
   (
     cd "$ROOT"
-    eval "$(worktree env --shell --infra-mode=shared)"
+    wtl_load_env --infra-mode=shared
     docker compose -p "$WTL_SHARED_INFRA_PROJECT_NAME" -f "$COMPOSE_FILE" logs --no-color --tail=200
   ) >"${prefix}-compose-logs.log" 2>&1 || true
 }

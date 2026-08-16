@@ -66,6 +66,7 @@ PROJECT="$WTL_CFG_PROJECT"
 # Override: WTL_PRUNE_WORKTREE_LIST_CMD emits one absolute path per line.
 _build_live_id_list() {
   if [ -n "${WTL_PRUNE_WORKTREE_LIST_CMD:-}" ]; then
+    # Intentional configured-command hook for test injection; this is not an env dump.
     while IFS= read -r path; do
       [ -n "$path" ] || continue
       wtl_id_for_path "$path"
@@ -94,6 +95,7 @@ _is_live_id() {
 # Override: WTL_PRUNE_DB_LIST_CMD emits one DB name per line.
 _list_candidate_dbs() {
   if [ -n "${WTL_PRUNE_DB_LIST_CMD:-}" ]; then
+    # Intentional configured-command hook for test injection; this is not an env dump.
     eval "$WTL_PRUNE_DB_LIST_CMD"
   else
     command -v psql >/dev/null 2>&1 || {

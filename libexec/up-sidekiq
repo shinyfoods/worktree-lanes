@@ -8,7 +8,10 @@ if [ "${1:-}" = "--detach" ] || [ "${WTL_DETACH:-0}" = "1" ]; then
   DETACH=1
 fi
 
-eval "$(worktree env --shell)"
+# shellcheck disable=SC1091,SC2119  # loader is sourced from the installed CLI root and intentionally receives no caller args
+. "$WTL_ROOT/lib/env.sh"
+# shellcheck disable=SC2119  # service arguments are not env-loader arguments
+wtl_load_env
 
 if [ "${WTL_HAS_SIDEKIQ:-0}" = "0" ]; then
   echo "worktree up-sidekiq: sidekiq is not configured for this project (WTL_HAS_SIDEKIQ=0)" >&2

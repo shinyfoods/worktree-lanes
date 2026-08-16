@@ -3,7 +3,9 @@
 
 set -euo pipefail
 
-eval "$(worktree env --shell --infra-mode=isolated)"
+# shellcheck disable=SC1091  # sourced from the installed CLI root
+. "$WTL_ROOT/lib/env.sh"
+wtl_load_env --infra-mode=isolated
 
 if [ "${WTL_HAS_FRONTEND:-0}" = "0" ]; then
   echo "worktree up-frontend-container: frontend is not configured for this project (WTL_HAS_FRONTEND=0)" >&2

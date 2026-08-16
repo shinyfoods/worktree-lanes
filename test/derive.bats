@@ -35,10 +35,10 @@ setup() {
 }
 
 @test "WTL_CI_LANE_SUFFIX neutral override changes WORKTREE_ID vs unset" {
-  # Simulate subprocess re-eval: run each call in its own subshell so the
+  # Simulate subprocess reload: run each call in its own subshell so the
   # WTL_CI_LANE_KEY written by wtl_derive does not bleed into the second call.
-  # This mirrors the real retry flow where `eval "$(worktree env --shell)"` is
-  # re-run after exporting WTL_CI_LANE_SUFFIX.
+  # This mirrors the real retry flow where the guarded env loader is re-run
+  # after exporting WTL_CI_LANE_SUFFIX.
 
   # Without suffix: WORKTREE_ID derived from root alone
   id_base="$(
