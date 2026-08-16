@@ -113,4 +113,9 @@ if [ "${GITHUB_ACTIONS:-}" = "true" ] && [ "${WTL_INFRA_MODE:-isolated}" != "sha
   worktree lane-down >/dev/null 2>&1 || true
 fi
 trap - EXIT INT TERM
+
+if [ "$RUN_EXIT" -eq 137 ]; then
+  echo "Infrastructure/resource diagnostic: backend command exited 137 (SIGKILL; likely Docker OOM/resource exhaustion)." >&2
+fi
+
 exit "$RUN_EXIT"
