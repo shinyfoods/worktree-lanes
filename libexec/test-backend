@@ -7,6 +7,9 @@ set -euo pipefail
 # shellcheck disable=SC1091  # sourced lib files are located at runtime via WTL_ROOT
 # shellcheck source=../lib/ci_compose_retry.sh
 . "$WTL_ROOT/lib/ci_compose_retry.sh"
+# shellcheck disable=SC1091  # WTL_ROOT points to the installed CLI root at runtime
+# shellcheck source=../lib/ci_postgres_readiness.sh
+. "$WTL_ROOT/lib/ci_postgres_readiness.sh"
 
 eval "$(worktree env --shell)"
 # COMPOSE_PROJECT_NAME and COMPOSE_FILE are set directly by worktree env --shell
@@ -20,10 +23,12 @@ trap cleanup_compose_on_exit EXIT INT TERM
 
 run_rspec() {
   local docker_run_env_flags=()
+  local readiness_project="$COMPOSE_PROJECT_NAME"
   if [ "$WTL_INFRA_MODE" = "shared" ]; then
     if [ "${WTL_DRYRUN:-0}" != "1" ]; then
       worktree shared-infra-up
     fi
+    readiness_project="$WTL_SHARED_INFRA_PROJECT_NAME"
     docker_run_env_flags+=(
       -e "DATABASE_URL=postgresql://${WTL_DB_USER}:${WTL_DB_PASSWORD}@${WTL_INFRA_DB_HOST}:${WTL_INFRA_DB_PORT}/${WTL_TEST_DB_NAME}"
       -e "REDIS_URL=redis://${WTL_INFRA_REDIS_HOST}:${WTL_INFRA_REDIS_PORT}/${WTL_REDIS_DB_TEST}"
@@ -46,6 +51,8 @@ run_rspec() {
     echo "DRY RUN: docker compose -p $COMPOSE_PROJECT_NAME -f $COMPOSE_FILE run --rm --no-deps -e RAILS_ENV=test ${docker_run_env_flags[*]} backend bundle exec rails db:prepare"
     echo "DRY RUN: docker compose -p $COMPOSE_PROJECT_NAME -f $COMPOSE_FILE run --rm --no-deps -e RAILS_ENV=test ${docker_run_env_flags[*]} backend bundle exec rspec $*"
   else
+    wtl_wait_for_postgres_ready "$readiness_project" "$COMPOSE_FILE" postgres "${WTL_POSTGRES_READINESS_TIMEOUT:-90}"
+
     docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --no-deps \
       -e RAILS_ENV=test \
       "${docker_run_env_flags[@]}" \
