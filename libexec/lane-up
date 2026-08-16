@@ -18,7 +18,7 @@ for arg in "$@"; do
   esac
 done
 
-eval "$(worktree env --shell --infra-mode=isolated)"
+wtl_load_env --infra-mode=isolated
 if ! docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" ps -q | grep -q .; then
   worktree env --check-ports --infra-mode=isolated >/dev/null
 fi

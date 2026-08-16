@@ -12,11 +12,13 @@ ARTIFACTS_DIR="${WTL_VALIDATE_ARTIFACTS_DIR:-}"
 VALIDATE_LOCK_DIR="${WTL_VALIDATE_LOCK_DIR:-/tmp/${WTL_PROJECT:-wtl}-validate-parallel.lock}"
 VALIDATE_LOCK_ACQUIRED=0
 
-# Source config early to get WTL_PROJECT for lock path before full env eval.
+# Source config early to get WTL_PROJECT for the lock path before loading the full env.
 # Use lib/config.sh:wtl_find_config — single source of truth for config discovery.
 _WTL_ROOT_VP="${WTL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # shellcheck source=../lib/config.sh
 . "$_WTL_ROOT_VP/lib/config.sh"
+# shellcheck disable=SC1091  # sourced from the installed CLI root
+. "$_WTL_ROOT_VP/lib/env.sh"
 if cfg=$(wtl_find_config 2>/dev/null); then
   # shellcheck disable=SC1090
   . "$cfg"
@@ -43,13 +45,46 @@ done
 ROOT=$(pwd -P)
 STARTED_AT_UTC=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 SHARED_INFRA_WAS_RUNNING=0
+SHARED_INFRA_PROBE_FAILED=0
+VALIDATE_SHARED_INFRA_PRESENT_STATUS=1
+VALIDATE_SHARED_INFRA_ENV_FAILURE_STATUS=125
 
 # Detect shared infra using config-driven project name (not hardcoded brand).
 # Use a subshell so --infra-mode=shared does not pollute the outer env with
 # GOTOGETHER_INFRA_MODE=shared (which would cause the backend-test step to
 # use shared infra instead of isolated, triggering port conflicts).
-if (eval "$(worktree env --shell --infra-mode=shared)" &&     docker compose -p "$WTL_SHARED_INFRA_PROJECT_NAME" -f "$COMPOSE_FILE" ps -q 2>/dev/null | grep -q .) 2>/dev/null; then
-  SHARED_INFRA_WAS_RUNNING=1
+probe_shared_infra() {
+  local env_status
+
+  (
+    if wtl_load_env --infra-mode=shared; then
+      :
+    else
+      env_status=$?
+      printf 'validate-parallel: shared-mode environment load failed (worktree env --shell --infra-mode=shared, status %s)\n' \
+        "$env_status" >&2
+      exit "$VALIDATE_SHARED_INFRA_ENV_FAILURE_STATUS"
+    fi
+
+    if docker compose -p "$WTL_SHARED_INFRA_PROJECT_NAME" -f "$COMPOSE_FILE" ps -q 2>/dev/null | grep -q .; then
+      exit "$VALIDATE_SHARED_INFRA_PRESENT_STATUS"
+    fi
+    exit 0
+  )
+}
+
+if probe_shared_infra; then
+  :
+else
+  shared_probe_status=$?
+  if [ "$shared_probe_status" -eq "$VALIDATE_SHARED_INFRA_PRESENT_STATUS" ]; then
+    SHARED_INFRA_WAS_RUNNING=1
+  else
+    SHARED_INFRA_PROBE_FAILED=1
+    printf 'validate-parallel: shared infrastructure probe failed (status %s); refusing to continue or tear down shared infrastructure.\n' \
+      "$shared_probe_status" >&2
+    exit "$shared_probe_status"
+  fi
 fi
 if [ "${WTL_VALIDATE_ALLOW_DIRTY:-0}" != "1" ] && [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
   echo "Refusing to run validation from a dirty worktree (script validates git state at HEAD)." >&2
@@ -191,13 +226,13 @@ capture_lane_context() {
 
   (
     cd "$wt"
-    eval "$(worktree env --shell --infra-mode=isolated)"
+    wtl_load_env --infra-mode=isolated
     docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" ps
   ) >"${prefix}-compose-ps.log" 2>&1 || true
 
   (
     cd "$wt"
-    eval "$(worktree env --shell --infra-mode=isolated)"
+    wtl_load_env --infra-mode=isolated
     docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" logs --no-color --tail=200
   ) >"${prefix}-compose-logs.log" 2>&1 || true
 }
@@ -207,13 +242,13 @@ capture_shared_infra_context() {
   local prefix="$LOG_DIR/shared-${step}"
   (
     cd "$ROOT"
-    eval "$(worktree env --shell --infra-mode=shared)"
+    wtl_load_env --infra-mode=shared
     docker compose -p "$WTL_SHARED_INFRA_PROJECT_NAME" -f "$COMPOSE_FILE" ps
   ) >"${prefix}-compose-ps.log" 2>&1 || true
 
   (
     cd "$ROOT"
-    eval "$(worktree env --shell --infra-mode=shared)"
+    wtl_load_env --infra-mode=shared
     docker compose -p "$WTL_SHARED_INFRA_PROJECT_NAME" -f "$COMPOSE_FILE" logs --no-color --tail=200
   ) >"${prefix}-compose-logs.log" 2>&1 || true
 }
@@ -226,7 +261,8 @@ cleanup() {
     (cd "$wt" && worktree lane-down >/dev/null 2>&1) || true
   done
   if [ "$KEEP" -ne 1 ]; then
-    if [ "$MODE" = "full" ] && [ "$SHARED_INFRA_WAS_RUNNING" -ne 1 ]; then
+    if [ "$MODE" = "full" ] && [ "$SHARED_INFRA_WAS_RUNNING" -ne 1 ] && \
+       [ "$SHARED_INFRA_PROBE_FAILED" -ne 1 ]; then
       (cd "$ROOT" && worktree shared-infra-down >/dev/null 2>&1) || true
     fi
     git -C "$ROOT" worktree remove --force "$WT1" >/dev/null 2>&1 || true

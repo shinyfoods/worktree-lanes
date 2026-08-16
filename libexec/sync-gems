@@ -32,7 +32,10 @@ for arg in "$@"; do
   esac
 done
 
-eval "$(worktree env --shell)"
+# shellcheck disable=SC1091,SC2119  # loader is sourced from the installed CLI root and intentionally receives no caller args
+. "$WTL_ROOT/lib/env.sh"
+# shellcheck disable=SC2119  # sync command arguments are not env-loader arguments
+wtl_load_env
 
 LOCKFILE="$WORKTREE_ROOT/backend/Gemfile.lock"
 if [ ! -f "$LOCKFILE" ]; then

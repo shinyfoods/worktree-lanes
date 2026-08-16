@@ -7,7 +7,10 @@
 
 set -euo pipefail
 
-eval "$(worktree env --shell)"
+# shellcheck disable=SC1091,SC2119  # loader is sourced from the installed CLI root and intentionally receives no caller args
+. "$WTL_ROOT/lib/env.sh"
+# shellcheck disable=SC2119  # backend command arguments are not env-loader arguments
+wtl_load_env
 EFFECTIVE_RAILS_ENV="${RAILS_ENV:-development}"
 EFFECTIVE_RACK_ENV="${RACK_ENV:-$EFFECTIVE_RAILS_ENV}"
 BASE_CI_LANE_SUFFIX="${WTL_CI_LANE_SUFFIX:-}"
@@ -28,7 +31,8 @@ compose_up_isolated_with_retry() {
     if [ "$CI_INFRA_STARTUP_ATTEMPTS" -gt 0 ] && [ "${GITHUB_ACTIONS:-}" = "true" ]; then
       retry_suffix="${BASE_CI_LANE_SUFFIX:-backend}-r${CI_INFRA_STARTUP_ATTEMPTS}"
       export WTL_CI_LANE_SUFFIX="$retry_suffix"
-      eval "$(worktree env --shell)"
+      # shellcheck disable=SC2119  # backend command arguments are not env-loader arguments
+      wtl_load_env
       echo "Retrying backend infra startup with CI lane suffix: $WTL_CI_LANE_SUFFIX" >&2
     fi
 

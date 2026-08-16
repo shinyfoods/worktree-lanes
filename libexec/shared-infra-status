@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-eval "$(worktree env --shell --infra-mode=shared)"
+# shellcheck disable=SC1091  # sourced from the installed CLI root
+. "$WTL_ROOT/lib/env.sh"
+wtl_load_env --infra-mode=shared
 export WORKTREE_ROOT="$MAIN_REPO"
 export WTL_POSTGRES_PORT="$WTL_SHARED_POSTGRES_PORT"
 export WTL_REDIS_PORT="$WTL_SHARED_REDIS_PORT"

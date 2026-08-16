@@ -141,3 +141,22 @@ EOF
   [ "$(cat "$ATTEMPTS_FILE")" -eq 3 ]
   ! grep -q "WTL_CI_LANE_SUFFIX" "$GITHUB_ENV"
 }
+
+@test "under CI, env derivation failure on a retry stops before the next compose attempt" {
+  make_fake_docker 1
+  cat > "$FAKE_BIN/worktree" <<'EOF'
+#!/usr/bin/env bash
+echo "retry env derivation failed" >&2
+exit 29
+EOF
+  chmod +x "$FAKE_BIN/worktree"
+  export GITHUB_ACTIONS=true
+  export WTL_ENV_STATUS=29
+  GITHUB_ENV="$(mktemp)"; export GITHUB_ENV
+  run wtl_compose_up_with_ci_retry "lane-up" -- backend
+  [ "$status" -eq 29 ]
+  [ "$(cat "$ATTEMPTS_FILE")" -eq 1 ]
+  [[ "$output" == *"retry env derivation failed"* ]]
+  [[ "$output" == *"worktree env --shell failed (status 29)"* ]]
+  ! grep -q "WTL_CI_LANE_SUFFIX" "$GITHUB_ENV"
+}

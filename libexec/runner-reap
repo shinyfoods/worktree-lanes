@@ -143,6 +143,7 @@ LANE_PROJECT_RE="^${PREFIX}-.+-${HEX8}$"
 
 # Emit one line per image tag: <full-id>\t<repo:tag>\t<created-epoch>\t<size-bytes>
 _reap_list_images() {
+  # Intentional configured-command hook for test injection; this is not an env dump.
   if [ -n "${WTL_REAP_IMAGE_LIST_CMD:-}" ]; then eval "$WTL_REAP_IMAGE_LIST_CMD"; return; fi
   local ids
   ids=$(docker images -q --no-trunc 2>/dev/null | sort -u) || return 0
@@ -176,6 +177,7 @@ _reap_list_images() {
 # failed" (non-zero return) so the caller can fail closed on a daemon flake
 # instead of treating every image as unreferenced.
 _reap_referenced_ids() {
+  # Intentional configured-command hook for test injection; this is not an env dump.
   if [ -n "${WTL_REAP_REFERENCED_IDS_CMD:-}" ]; then eval "$WTL_REAP_REFERENCED_IDS_CMD"; return; fi
   local cids
   cids=$(docker ps -aq 2>/dev/null) || return 1
@@ -189,6 +191,7 @@ _reap_referenced_ids() {
 
 # Emit one compose-project name per line (from container/volume/network labels).
 _reap_list_projects() {
+  # Intentional configured-command hook for test injection; this is not an env dump.
   if [ -n "${WTL_REAP_PROJECT_LIST_CMD:-}" ]; then eval "$WTL_REAP_PROJECT_LIST_CMD"; return; fi
   {
     docker ps -a --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null || true
@@ -203,6 +206,7 @@ _reap_list_projects() {
 # derive.sh hardens against. Returns non-zero if every attempt fails so the
 # caller can fail closed instead of reading "no live worktrees".
 _reap_live_worktree_paths() {
+  # Intentional configured-command hook for test injection; this is not an env dump.
   if [ -n "${WTL_REAP_WORKTREE_LIST_CMD:-}" ]; then eval "$WTL_REAP_WORKTREE_LIST_CMD"; return; fi
   local list line
   list="$(wtl_git_retry git -C "$WTL_MAIN_REPO" worktree list --porcelain)" || return 1
@@ -216,16 +220,19 @@ _reap_live_worktree_paths() {
 }
 
 _reap_rmi() {
+  # Intentional configured-command hook for test injection; this is not an env dump.
   if [ -n "${WTL_REAP_RMI_CMD:-}" ]; then eval "$WTL_REAP_RMI_CMD \"\$1\""; return; fi
   docker rmi "$1" >/dev/null 2>&1
 }
 
 _reap_compose_down() {
+  # Intentional configured-command hook for test injection; this is not an env dump.
   if [ -n "${WTL_REAP_DOWN_CMD:-}" ]; then eval "$WTL_REAP_DOWN_CMD \"\$1\""; return; fi
   docker compose -p "$1" -f "$COMPOSE_FILE" down -v --remove-orphans >/dev/null 2>&1
 }
 
 _reap_builder_prune() {
+  # Intentional configured-command hook for test injection; this is not an env dump.
   if [ -n "${WTL_REAP_BUILDER_PRUNE_CMD:-}" ]; then eval "$WTL_REAP_BUILDER_PRUNE_CMD \"\$1\""; return; fi
   docker builder prune -f --filter "until=$1"
 }
