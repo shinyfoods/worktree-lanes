@@ -52,3 +52,58 @@ extract_helpers() {            # sources the two probe helpers out of libexec/la
   grep -q 'stopped_service="\$probe_service"' "$BATS_TEST_DIRNAME/../libexec/lane-up"
   grep -q "is not running — it exited or never started" "$BATS_TEST_DIRNAME/../libexec/lane-up"
 }
+
+# A running container whose ports mapping was never applied reads as a slow one until
+# the budget expires. These exercise the helper directly for the same reason as above —
+# grepping lane-up for the message would pass on a version that never calls it.
+
+extract_published_helpers() {  # sources container_port_for_service + compose_service_published
+  local src="$BATS_TEST_DIRNAME/../libexec/lane-up"
+  {
+    awk '/^  container_port_for_service\(\) \{/,/^  \}/' "$src"
+    awk '/^  compose_service_published\(\) \{/,/^  \}/' "$src"
+  } | sed 's/^  //'
+}
+
+@test "compose_service_published reports published when docker returns a mapping" {
+  eval "$(extract_published_helpers)"
+  docker() { printf '0.0.0.0:54594\n'; }
+  export -f docker 2>/dev/null || true
+  COMPOSE_PROJECT_NAME=p COMPOSE_FILE=f run compose_service_published frontend
+  [ "$status" -eq 0 ]
+}
+
+@test "compose_service_published reports NOT published when docker succeeds with no mapping" {
+  eval "$(extract_published_helpers)"
+  docker() { return 0; }        # exit 0, empty output — the observed CI signature
+  export -f docker 2>/dev/null || true
+  COMPOSE_PROJECT_NAME=p COMPOSE_FILE=f run compose_service_published frontend
+  [ "$status" -ne 0 ]
+}
+
+@test "compose_service_published fails safe when docker errors" {
+  eval "$(extract_published_helpers)"
+  docker() { return 1; }
+  export -f docker 2>/dev/null || true
+  COMPOSE_PROJECT_NAME=p COMPOSE_FILE=f run compose_service_published frontend
+  [ "$status" -eq 0 ]
+}
+
+@test "compose_service_published skips a service with no known container port" {
+  eval "$(extract_published_helpers)"
+  docker() { return 0; }        # would report unpublished if the service were checked
+  export -f docker 2>/dev/null || true
+  COMPOSE_PROJECT_NAME=p COMPOSE_FILE=f run compose_service_published sidekiq
+  [ "$status" -eq 0 ]
+}
+
+@test "the readiness wait breaks on a missing binding and says so distinctly" {
+  grep -q 'unpublished_service="\$probe_service"' "$BATS_TEST_DIRNAME/../libexec/lane-up"
+  grep -q "has no published host port for container port" "$BATS_TEST_DIRNAME/../libexec/lane-up"
+}
+
+@test "liveness is checked before the binding, so a dead container is not misreported" {
+  live=$(grep -n 'stopped_service="\$probe_service"' "$BATS_TEST_DIRNAME/../libexec/lane-up" | head -1 | cut -d: -f1)
+  bind=$(grep -n 'unpublished_service="\$probe_service"' "$BATS_TEST_DIRNAME/../libexec/lane-up" | head -1 | cut -d: -f1)
+  [ -n "$live" ] && [ -n "$bind" ] && [ "$live" -lt "$bind" ]
+}
