@@ -59,6 +59,10 @@ echo "Compose project: $COMPOSE_PROJECT_NAME"
 echo "Frontend: $WTL_FRONTEND_URL"
 echo "API:      $WTL_API_BASE_URL"
 echo "MailHog:  http://localhost:$WTL_MAILHOG_UI_PORT"
+# The published-port check reads `docker compose port` output, whose shape differs between
+# compose versions. Recording the version on every bring-up means a future mismatch is
+# diagnosable from the log rather than by guessing at the runner's toolchain.
+echo "Compose:  $(docker compose version --short 2>/dev/null || echo unknown)"
 
 if [ "$DETACH" -eq 1 ]; then
   run_compose_up_detached "${services[@]}"
@@ -112,33 +116,44 @@ if [ "$DETACH" -eq 1 ]; then
   # A running container whose ports mapping was never applied can never be reached, and
   # is indistinguishable from a slow one until the budget expires: the container reports
   # Up, the app inside logs a clean boot, and the host port simply does not exist. Seen
-  # twice on this project's post-merge lane within 90 minutes, on a different service
-  # each time, with compose reporting success both times.
+  # repeatedly on this project's post-merge lane, on a different service each time, with
+  # compose reporting success every time.
   #
-  # `docker compose port` reports a MISSING binding by exiting non-zero with
-  # "no public port '<n>' published for <container>" -- NOT by succeeding with empty
-  # output. An earlier version of this check treated every non-zero exit as fail-safe
-  # "published", which swallowed the one signal it existed to catch: a lane whose
-  # mailhog UI port was unpublished ran the full 120-attempt budget and reported a
-  # plain timeout, exactly as before the check was added.
+  # Two earlier versions of this check could never fire, each because it encoded a guessed
+  # shape of `docker compose port` rather than a measured one. Measured on Compose v5.3.1:
   #
-  # So the verdict is taken from the message, and everything else still fails SAFE.
-  # Liveness is checked before this, so a stopped service is already handled there;
-  # a docker that cannot answer must never abort a wait that would have succeeded.
+  #   published                  rc 0  "0.0.0.0:55000"
+  #   running, NOT published     rc 0  "invalid IP:0"        <-- the defect shape
+  #   port not declared          rc 1  "no port 8025/tcp for container <name>: ..."
+  #   stopped / unknown service  rc 1  "service \"<name>\" is not running"
+  #
+  # So the verdict is taken from a POSITIVE shape -- output that IS a host:port with a
+  # non-zero port -- rather than from a list of failure strings. That list has grown a hole
+  # on every attempt, and each hole was invisible because the tests encoded the same list.
+  # An unrecognised success now fails toward detection rather than toward silence.
+  #
+  # Liveness is checked before this, so a stopped service is already handled there; a
+  # docker that cannot answer must never abort a wait that would have succeeded.
   compose_service_published() {
-    local cport out rc
+    local cport out rc mapping
     cport="$(container_port_for_service "$1")"
     [ -n "$cport" ] || return 0
     out="$(docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" port "$1" "$cport" 2>&1)"
     rc=$?
+
     if [ "$rc" -eq 0 ]; then
-      # Success prints host:port. Empty-on-success is not a shape docker produces here,
-      # but it cannot mean "published", so treat it as missing rather than assuming.
-      [ -n "$out" ] && return 0
+      mapping="$(printf '%s\n' "$out" | tail -n 1)"
+      # host:port with a non-zero port. "invalid IP:0" fails on both counts.
+      printf '%s' "$mapping" | grep -Eq '^[^[:space:]]+:[1-9][0-9]*$' && return 0
       return 1
     fi
+
     case "$out" in
-      *"no public port"*) return 1 ;;
+      # Liveness owns this diagnosis; reporting it here would mislabel a crash.
+      *"is not running"*) return 0 ;;
+      # Older compose wording, and the not-declared shape. Both are definite negatives.
+      *"no public port"*|*"no port "*) return 1 ;;
+      # Daemon unreachable, docker absent, anything unmodelled: fail SAFE.
       *) return 0 ;;
     esac
   }
