@@ -181,6 +181,58 @@ extract_published_helpers() {  # sources container_port_for_service + compose_se
   [ "$status" -ne 0 ]
 }
 
+# The forensics dump exists to make an intermittent defect self-documenting. Its whole value
+# is that it runs unattended on a lane nobody is watching, so a probe that fails silently
+# would leave a gap indistinguishable from "nothing to report".
+
+extract_probe() {  # sources the probe helper alone
+  local src="$BATS_TEST_DIRNAME/../libexec/lane-up"
+  awk '/^  probe\(\) \{/,/^  \}/' "$src" | sed 's/^  //'
+}
+
+@test "probe labels a missing command as unavailable rather than printing nothing" {
+  eval "$(extract_probe)"
+  run probe "ephemeral range" definitely-not-a-real-command --flag
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ephemeral range: unavailable"* ]]
+  [[ "$output" == *"not on PATH"* ]]
+}
+
+@test "probe labels a failing command as unavailable and keeps going" {
+  eval "$(extract_probe)"
+  run probe "dockerd bind errors" sh -c 'echo "permission denied"; exit 1'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dockerd bind errors: unavailable"* ]]
+  [[ "$output" == *"permission denied"* ]]
+}
+
+@test "probe distinguishes an empty result from an unavailable one" {
+  eval "$(extract_probe)"
+  run probe "open sockets" sh -c 'true'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"open sockets: (empty)"* ]]
+  [[ "$output" != *"unavailable"* ]]
+}
+
+@test "probe collapses a multi-line value onto one labelled line" {
+  eval "$(extract_probe)"
+  # journalctl's tail is genuinely multi-line; without the collapse its later lines appear
+  # unlabelled in the dump and read as separate probes.
+  run probe "dockerd bind errors" sh -c 'printf "line one\nline two\nline three\n"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dockerd bind errors: line one line two line three"* ]]
+  [ "$(printf '%s' "$output" | grep -c .)" -eq 1 ]
+}
+
+@test "the forensics dump is wired to the binding diagnosis only" {
+  src="$BATS_TEST_DIRNAME/../libexec/lane-up"
+  # Guarded by unpublished_service, so a plain timeout or a dead container does not emit
+  # forensics for a binding that was never the problem.
+  run grep -A2 'if \[ -n "$unpublished_service" \]; then' "$src"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dump_binding_forensics"* ]]
+}
+
 @test "compose_service_published skips a service with no known container port" {
   eval "$(extract_published_helpers)"
   docker() { return 0; }        # would report unpublished if the service were checked
