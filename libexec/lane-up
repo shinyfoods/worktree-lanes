@@ -115,16 +115,32 @@ if [ "$DETACH" -eq 1 ]; then
   # twice on this project's post-merge lane within 90 minutes, on a different service
   # each time, with compose reporting success both times.
   #
-  # Fails SAFE on the same terms as compose_service_running: only a `port` call that
-  # SUCCEEDS and returns nothing is evidence of a missing binding. An error, a missing
-  # docker, or an unmapped service name all report published.
+  # `docker compose port` reports a MISSING binding by exiting non-zero with
+  # "no public port '<n>' published for <container>" -- NOT by succeeding with empty
+  # output. An earlier version of this check treated every non-zero exit as fail-safe
+  # "published", which swallowed the one signal it existed to catch: a lane whose
+  # mailhog UI port was unpublished ran the full 120-attempt budget and reported a
+  # plain timeout, exactly as before the check was added.
+  #
+  # So the verdict is taken from the message, and everything else still fails SAFE.
+  # Liveness is checked before this, so a stopped service is already handled there;
+  # a docker that cannot answer must never abort a wait that would have succeeded.
   compose_service_published() {
-    local cport mapping
+    local cport out rc
     cport="$(container_port_for_service "$1")"
     [ -n "$cport" ] || return 0
-    mapping="$(docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" port "$1" "$cport" 2>/dev/null)" || return 0
-    [ -n "$mapping" ] && return 0
-    return 1
+    out="$(docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" port "$1" "$cport" 2>&1)"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      # Success prints host:port. Empty-on-success is not a shape docker produces here,
+      # but it cannot mean "published", so treat it as missing rather than assuming.
+      [ -n "$out" ] && return 0
+      return 1
+    fi
+    case "$out" in
+      *"no public port"*) return 1 ;;
+      *) return 0 ;;
+    esac
   }
 
   for target in "${targets[@]}"; do
