@@ -181,6 +181,31 @@ if [ "$DETACH" -eq 1 ]; then
     return 0
   }
 
+  # A service that STARTED and then went away is a different defect from a binding that was
+  # never applied, and needs different evidence: why did it exit? Exit code alone does not
+  # settle it -- a container killed by the OOM killer and one that exits 137 on its own are
+  # indistinguishable by code, so State.OOMKilled is captured alongside it.
+  #
+  # Uses `ps -aq`, not `-q`: a stopped container is absent from `-q` entirely, which would
+  # leave this dump reporting "no container id" for exactly the case it exists to explain.
+  dump_exit_forensics() {
+    local svc="$1" cid
+    echo "Exit forensics for the stopped service:" >&2
+
+    cid="$(docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" ps -aq "$svc" 2>/dev/null | head -n 1)"
+    if [ -n "$cid" ]; then
+      probe "exit state" docker inspect -f 'status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} err={{.State.Error}} started={{.State.StartedAt}} finished={{.State.FinishedAt}}' "$cid"
+      probe "restart count" docker inspect -f '{{.RestartCount}}' "$cid"
+    else
+      echo "  exit state: unavailable (no container id for $svc, even with -a)" >&2
+    fi
+
+    probe "host memory" sh -c 'free -m 2>/dev/null | sed -n 2p'
+    probe "kernel oom lines" sh -c 'dmesg 2>/dev/null | grep -iE "out of memory|oom-killer|killed process" | tail -n 3'
+    probe "dockerd kill lines" sh -c 'journalctl -u docker --since "-5 min" --no-pager 2>&1 | grep -iE "oom|kill|died|exit" | tail -n 5'
+    probe "compose projects on host" sh -c 'docker ps --format "{{.Label \"com.docker.compose.project\"}}" | sort -u | grep -c . || echo 0'
+  }
+
   # Host-side facts for the dropped-binding investigation. Collected at the moment the
   # binding check fires, because the defect is intermittent: a diagnostic run launched
   # separately lands on a healthy lane and settles nothing.
@@ -268,7 +293,9 @@ if [ "$DETACH" -eq 1 ]; then
       if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
         echo "Compose status after readiness timeout:" >&2
         docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" ps >&2 || true
-        if [ -n "$unpublished_service" ]; then
+        if [ -n "$stopped_service" ]; then
+          dump_exit_forensics "$stopped_service"
+        elif [ -n "$unpublished_service" ]; then
           dump_binding_forensics "$unpublished_service" "$(container_port_for_service "$unpublished_service")"
         fi
         case "$target" in

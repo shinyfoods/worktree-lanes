@@ -224,6 +224,39 @@ extract_probe() {  # sources the probe helper alone
   [ "$(printf '%s' "$output" | grep -c .)" -eq 1 ]
 }
 
+@test "exit forensics look up the container with -aq, not -q" {
+  src="$BATS_TEST_DIRNAME/../libexec/lane-up"
+  # A stopped container is absent from `ps -q` entirely. Measured: `-q` returns empty for an
+  # exited container while `-aq` returns its id. Using `-q` here would make this dump report
+  # "no container id" for precisely the case it exists to explain.
+  run bash -c "awk '/^  dump_exit_forensics\(\) \{/,/^  \}/' '$src' | grep -c 'ps -aq'"
+  [ "$status" -eq 0 ]
+  [ "$output" -ge 1 ]
+  run bash -c "awk '/^  dump_exit_forensics\(\) \{/,/^  \}/' '$src' | grep -c 'ps -q'"
+  [ "$output" -eq 0 ]
+}
+
+@test "exit forensics capture OOMKilled alongside the exit code" {
+  src="$BATS_TEST_DIRNAME/../libexec/lane-up"
+  # Exit 137 is SIGKILL, which an OOM kill produces -- but so does a plain `exit 137`.
+  # Measured on a real container: status=exited exit=137 oom=false. The code alone does
+  # not settle the AC's question, so both fields must be captured.
+  run bash -c "awk '/^  dump_exit_forensics\(\) \{/,/^  \}/' '$src' | grep 'exit state'"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *".State.ExitCode"* ]]
+  [[ "$output" == *".State.OOMKilled"* ]]
+}
+
+@test "a stopped service gets exit forensics, not binding forensics" {
+  src="$BATS_TEST_DIRNAME/../libexec/lane-up"
+  # The two diagnoses need different evidence; emitting binding forensics for a container
+  # that exited would describe a mapping that was never the problem.
+  run grep -A4 'if \[ -n "$stopped_service" \]; then' "$src"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dump_exit_forensics"* ]]
+  [[ "$output" == *"elif"* ]]
+}
+
 @test "the forensics dump is wired to the binding diagnosis only" {
   src="$BATS_TEST_DIRNAME/../libexec/lane-up"
   # Guarded by unpublished_service, so a plain timeout or a dead container does not emit
