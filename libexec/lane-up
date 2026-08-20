@@ -86,6 +86,18 @@ if [ "$DETACH" -eq 1 ]; then
     esac
   }
 
+  # The container port each probed service publishes to the host. Only services that
+  # appear in service_for_target need an entry; a service with no entry is skipped by
+  # the binding check rather than assumed broken.
+  container_port_for_service() {
+    case "$1" in
+      frontend) echo "5173" ;;
+      backend)  echo "3000" ;;
+      mailhog)  echo "8025" ;;
+      *) echo "" ;;
+    esac
+  }
+
   # Fails SAFE: any doubt about the listing — command error, empty output, no docker —
   # reports the service as running, so a transient docker hiccup can never abort a wait
   # that would have succeeded. Only a listing that is readable AND omits the service
@@ -97,10 +109,29 @@ if [ "$DETACH" -eq 1 ]; then
     printf '%s\n' "$running" | grep -qx "$1"
   }
 
+  # A running container whose ports mapping was never applied can never be reached, and
+  # is indistinguishable from a slow one until the budget expires: the container reports
+  # Up, the app inside logs a clean boot, and the host port simply does not exist. Seen
+  # twice on this project's post-merge lane within 90 minutes, on a different service
+  # each time, with compose reporting success both times.
+  #
+  # Fails SAFE on the same terms as compose_service_running: only a `port` call that
+  # SUCCEEDS and returns nothing is evidence of a missing binding. An error, a missing
+  # docker, or an unmapped service name all report published.
+  compose_service_published() {
+    local cport mapping
+    cport="$(container_port_for_service "$1")"
+    [ -n "$cport" ] || return 0
+    mapping="$(docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" port "$1" "$cport" 2>/dev/null)" || return 0
+    [ -n "$mapping" ] && return 0
+    return 1
+  }
+
   for target in "${targets[@]}"; do
     echo "Waiting for $target ..."
     ready=0
     stopped_service=""
+    unpublished_service=""
     max_attempts=60
     if [ "$target" = "$WTL_FRONTEND_URL" ] && [ "${WTL_FRONTEND_RUN_MODE:-dev}" = "preview" ]; then
       # Preview mode performs a Vite production build on startup; allow extra warmup time in CI.
@@ -129,12 +160,20 @@ if [ "$DETACH" -eq 1 ]; then
           stopped_service="$probe_service"
           break
         fi
+        # Checked after liveness, never before: a container that has exited also has no
+        # published port, and "not running" is the more accurate of the two diagnoses.
+        if [ -n "$probe_service" ] && ! compose_service_published "$probe_service"; then
+          unpublished_service="$probe_service"
+          break
+        fi
       fi
       sleep 1
     done
     if [ "$ready" -ne 1 ]; then
       if [ -n "$stopped_service" ]; then
         echo "Service '$stopped_service' is not running — it exited or never started; abandoning the readiness wait for $target" >&2
+      elif [ -n "$unpublished_service" ]; then
+        echo "Service '$unpublished_service' is running but has no published host port for container port $(container_port_for_service "$unpublished_service") — compose created the container without the requested mapping, so $target can never be reached; abandoning the readiness wait" >&2
       else
         echo "Timed out waiting for $target" >&2
       fi
