@@ -204,7 +204,13 @@ if [ "$DETACH" -eq 1 ]; then
     probe "compose projects on host" sh -c 'docker ps --format "{{.Label \"com.docker.compose.project\"}}" | sort -u | grep -c . || echo 0'
     probe "published ports on host" sh -c 'docker ps --format "{{.Ports}}" | tr "," "\n" | grep -c "->" || echo 0'
     probe "docker version" docker version --format '{{.Server.Version}} api={{.Server.APIVersion}}'
-    probe "daemon uptime" sh -c 'ps -o etime= -p "$(pgrep -o dockerd)" 2>/dev/null || echo unknown'
+    local dpid
+    dpid="$(pgrep -o dockerd 2>/dev/null || true)"
+    if [ -n "$dpid" ]; then
+      probe "daemon uptime" ps -o etime= -p "$dpid"
+    else
+      echo "  daemon uptime: unavailable (no dockerd pid)" >&2
+    fi
     probe "dockerd bind errors" sh -c 'journalctl -u docker --since "-5 min" --no-pager 2>&1 | grep -iE "bind|port" | tail -n 5'
     echo "  (probe target: $svc container port $cport)" >&2
   }
