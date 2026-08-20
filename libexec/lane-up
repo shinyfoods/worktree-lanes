@@ -75,9 +75,32 @@ if [ "$DETACH" -eq 1 ]; then
   if [ "${WTL_FRONTEND_RUN_MODE:-dev}" = "preview" ]; then
     targets+=("$WTL_FRONTEND_URL/login")
   fi
+  # Which compose service backs each readiness target. Same mapping the timeout
+  # diagnostic below uses to pick a log stream.
+  service_for_target() {
+    case "$1" in
+      "$WTL_FRONTEND_URL"|"$WTL_FRONTEND_URL/login") echo "frontend" ;;
+      "$WTL_API_BASE_URL/csrf_token") echo "backend" ;;
+      "$WTL_MAILHOG_API_URL/v2/messages") echo "mailhog" ;;
+      *) echo "" ;;
+    esac
+  }
+
+  # Fails SAFE: any doubt about the listing — command error, empty output, no docker —
+  # reports the service as running, so a transient docker hiccup can never abort a wait
+  # that would have succeeded. Only a listing that is readable AND omits the service
+  # counts as evidence the container is gone.
+  compose_service_running() {
+    local running
+    running="$(docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" ps --services --status running 2>/dev/null)" || return 0
+    [ -n "$running" ] || return 0
+    printf '%s\n' "$running" | grep -qx "$1"
+  }
+
   for target in "${targets[@]}"; do
     echo "Waiting for $target ..."
     ready=0
+    stopped_service=""
     max_attempts=60
     if [ "$target" = "$WTL_FRONTEND_URL" ] && [ "${WTL_FRONTEND_RUN_MODE:-dev}" = "preview" ]; then
       # Preview mode performs a Vite production build on startup; allow extra warmup time in CI.
@@ -97,11 +120,24 @@ if [ "$DETACH" -eq 1 ]; then
       fi
       if [ $((attempt % 5)) -eq 0 ]; then
         echo "Still waiting for $target ($attempt/$max_attempts)"
+        # A container that has exited will never become ready, so waiting out the
+        # remaining budget only converts a crash into an indistinguishable timeout.
+        # Checked on the progress cadence rather than every second to keep this to one
+        # docker call per five attempts.
+        probe_service="$(service_for_target "$target")"
+        if [ -n "$probe_service" ] && ! compose_service_running "$probe_service"; then
+          stopped_service="$probe_service"
+          break
+        fi
       fi
       sleep 1
     done
     if [ "$ready" -ne 1 ]; then
-      echo "Timed out waiting for $target" >&2
+      if [ -n "$stopped_service" ]; then
+        echo "Service '$stopped_service' is not running — it exited or never started; abandoning the readiness wait for $target" >&2
+      else
+        echo "Timed out waiting for $target" >&2
+      fi
       if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
         echo "Compose status after readiness timeout:" >&2
         docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" ps >&2 || true
