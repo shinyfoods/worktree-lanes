@@ -65,13 +65,25 @@ extract_published_helpers() {  # sources container_port_for_service + compose_se
   } | sed 's/^  //'
 }
 
-# The shapes below were captured from a real docker, not assumed. A previous version of
-# this suite asserted that a missing binding shows up as "exit 0, empty output"; docker
-# never produces that, so the check shipped inverted and the tests passed anyway.
+# The shapes below were captured by running `docker compose port` against a compose project
+# built to reproduce each case -- one published service and one exposed-only service.
+# They are VERSION-DEPENDENT, so the version is recorded with them; two earlier rounds of
+# this check shipped inverted because each encoded a guessed shape and the tests agreed
+# with the guess, so every mutant died correctly while the check could never fire.
 #
-#   published:   exit 0, "0.0.0.0:43073"
-#   unpublished: exit 1, "no public port '3000' published for <container>"
-#   not running: exit 1, "service \"sidekiq\" is not running"
+# Docker Compose v5.3.1:
+#
+#   published                 rc 0  "0.0.0.0:55000"
+#   running, NOT published    rc 0  "invalid IP:0"        <-- the defect this check exists for
+#   port not declared         rc 1  "no port 8025/tcp for container <name>: 1025/tcp, 1025/tcp"
+#   stopped/unknown service   rc 1  "service \"unpub\" is not running"
+#
+# An earlier capture recorded `unpublished: exit 1, "no public port '3000' published"`. No
+# compose version available here produces that for an unpublished binding; the predicate
+# still treats it as a negative so an older runner stays covered.
+#
+# The predicate is therefore a positive shape test -- is the output a host:port with a
+# non-zero port -- not a list of failure strings. Assert against BOTH shapes below.
 
 @test "compose_service_published reports published when docker returns a mapping" {
   eval "$(extract_published_helpers)"
@@ -110,6 +122,62 @@ extract_published_helpers() {  # sources container_port_for_service + compose_se
   docker() { return 0; }
   export -f docker 2>/dev/null || true
   COMPOSE_PROJECT_NAME=p COMPOSE_FILE=f run compose_service_published frontend
+  [ "$status" -ne 0 ]
+}
+
+# --- shapes measured on Docker Compose v5.3.1 (see the table above) ---
+
+@test "compose_service_published reports NOT published for an exposed-but-unpublished port" {
+  eval "$(extract_published_helpers)"
+  # The defect shape: docker EXITS 0 and prints a non-empty string. Two prior versions of
+  # this check treated exit-0-with-output as proof of publication and could never fire.
+  docker() { printf 'invalid IP:0\n'; return 0; }
+  export -f docker 2>/dev/null || true
+  COMPOSE_PROJECT_NAME=p COMPOSE_FILE=f run compose_service_published mailhog
+  [ "$status" -ne 0 ]
+}
+
+@test "compose_service_published reports NOT published on a zero host port" {
+  eval "$(extract_published_helpers)"
+  docker() { printf '0.0.0.0:0\n'; return 0; }
+  export -f docker 2>/dev/null || true
+  COMPOSE_PROJECT_NAME=p COMPOSE_FILE=f run compose_service_published mailhog
+  [ "$status" -ne 0 ]
+}
+
+@test "compose_service_published reports NOT published on an unrecognised success shape" {
+  eval "$(extract_published_helpers)"
+  # An unparseable success is not evidence of a binding. Failing toward detection here is
+  # what keeps the next unmodelled output shape from silently disabling the check.
+  docker() { printf 'something we have never seen\n'; return 0; }
+  export -f docker 2>/dev/null || true
+  COMPOSE_PROJECT_NAME=p COMPOSE_FILE=f run compose_service_published mailhog
+  [ "$status" -ne 0 ]
+}
+
+@test "compose_service_published reports NOT published on a prose line ending in a port" {
+  eval "$(extract_published_helpers)"
+  # Guards the no-whitespace half of the shape test independently of the non-zero-port
+  # half; without it, only the port clause is actually exercised.
+  docker() { printf 'invalid IP:8025\n'; return 0; }
+  export -f docker 2>/dev/null || true
+  COMPOSE_PROJECT_NAME=p COMPOSE_FILE=f run compose_service_published mailhog
+  [ "$status" -ne 0 ]
+}
+
+@test "compose_service_published reports published for an IPv6 mapping" {
+  eval "$(extract_published_helpers)"
+  docker() { printf '[::]:55000\n'; return 0; }
+  export -f docker 2>/dev/null || true
+  COMPOSE_PROJECT_NAME=p COMPOSE_FILE=f run compose_service_published mailhog
+  [ "$status" -eq 0 ]
+}
+
+@test "compose_service_published reports NOT published when the port is not declared" {
+  eval "$(extract_published_helpers)"
+  docker() { echo "no port 8025/tcp for container portprobe-pub-1: 1025/tcp, 1025/tcp"; return 1; }
+  export -f docker 2>/dev/null || true
+  COMPOSE_PROJECT_NAME=p COMPOSE_FILE=f run compose_service_published mailhog
   [ "$status" -ne 0 ]
 }
 
