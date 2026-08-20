@@ -65,6 +65,14 @@ extract_published_helpers() {  # sources container_port_for_service + compose_se
   } | sed 's/^  //'
 }
 
+# The shapes below were captured from a real docker, not assumed. A previous version of
+# this suite asserted that a missing binding shows up as "exit 0, empty output"; docker
+# never produces that, so the check shipped inverted and the tests passed anyway.
+#
+#   published:   exit 0, "0.0.0.0:43073"
+#   unpublished: exit 1, "no public port '3000' published for <container>"
+#   not running: exit 1, "service \"sidekiq\" is not running"
+
 @test "compose_service_published reports published when docker returns a mapping" {
   eval "$(extract_published_helpers)"
   docker() { printf '0.0.0.0:54594\n'; }
@@ -73,20 +81,36 @@ extract_published_helpers() {  # sources container_port_for_service + compose_se
   [ "$status" -eq 0 ]
 }
 
-@test "compose_service_published reports NOT published when docker succeeds with no mapping" {
+@test "compose_service_published reports NOT published on docker's real missing-binding output" {
   eval "$(extract_published_helpers)"
-  docker() { return 0; }        # exit 0, empty output — the observed CI signature
+  docker() { echo "no public port '5173' published for huddle-ci-x-frontend-1"; return 1; }
   export -f docker 2>/dev/null || true
   COMPOSE_PROJECT_NAME=p COMPOSE_FILE=f run compose_service_published frontend
   [ "$status" -ne 0 ]
 }
 
-@test "compose_service_published fails safe when docker errors" {
+@test "compose_service_published fails safe when the service is not running" {
   eval "$(extract_published_helpers)"
-  docker() { return 1; }
+  docker() { echo 'service "frontend" is not running'; return 1; }
+  export -f docker 2>/dev/null || true
+  COMPOSE_PROJECT_NAME=p COMPOSE_FILE=f run compose_service_published frontend
+  [ "$status" -eq 0 ]          # liveness owns this case; do not double-report it
+}
+
+@test "compose_service_published fails safe when docker is unavailable" {
+  eval "$(extract_published_helpers)"
+  docker() { echo "Cannot connect to the Docker daemon"; return 1; }
   export -f docker 2>/dev/null || true
   COMPOSE_PROJECT_NAME=p COMPOSE_FILE=f run compose_service_published frontend
   [ "$status" -eq 0 ]
+}
+
+@test "compose_service_published treats empty-on-success as missing, not published" {
+  eval "$(extract_published_helpers)"
+  docker() { return 0; }
+  export -f docker 2>/dev/null || true
+  COMPOSE_PROJECT_NAME=p COMPOSE_FILE=f run compose_service_published frontend
+  [ "$status" -ne 0 ]
 }
 
 @test "compose_service_published skips a service with no known container port" {
