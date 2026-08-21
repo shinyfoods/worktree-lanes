@@ -284,3 +284,84 @@ extract_probe() {  # sources the probe helper alone
   bind=$(grep -n 'unpublished_service="\$probe_service"' "$BATS_TEST_DIRNAME/../libexec/lane-up" | head -1 | cut -d: -f1)
   [ -n "$live" ] && [ -n "$bind" ] && [ "$live" -lt "$bind" ]
 }
+
+# --- forensics probes are executed, not read -------------------------------------------
+# Both defects these cover were invisible in the source and only appeared in the output of a
+# real CI run: `grep -c "->"` parses `->` as options, and `cmd -c ... || echo 0` prints the
+# count twice when it is zero. Asserting on the source text would have missed both, so these
+# extract each probe's real command line and run it against a stub `docker`.
+
+stub_docker() {                # $1 = text that `docker ps --format '{{.Ports}}'` should emit
+  WTL_STUB_BIN="$(mktemp -d)"
+  cat > "$WTL_STUB_BIN/docker" <<STUB
+#!/bin/sh
+printf '%s' "\$WTL_STUB_PORTS" | sed '/^\$/d'
+STUB
+  chmod +x "$WTL_STUB_BIN/docker"
+  export WTL_STUB_PORTS="$1"
+  export PATH="$WTL_STUB_BIN:$PATH"
+}
+
+run_forensic_probe() {         # $1 = probe label, $2 = enclosing forensics function
+  local src="$BATS_TEST_DIRNAME/../libexec/lane-up" line
+  line="$(awk "/^  ${2}\\(\\) \\{/,/^  \\}/" "$src" | grep -F "probe \"$1\"" | head -1)"
+  [ -n "$line" ] || { echo "no probe labelled '$1' in $2"; return 2; }
+  probe() { shift; "$@"; }     # drop the label, surface the command's raw output
+  eval "${line#"${line%%[![:space:]]*}"}"
+}
+
+@test "the published-port count probe emits exactly one integer" {
+  stub_docker '0.0.0.0:55464->3000/tcp, [::]:55464->3000/tcp'
+  run run_forensic_probe "published ports on host" dump_binding_forensics
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c .)" -eq 1 ]
+  [[ "$output" =~ ^[0-9]+$ ]]
+  [ "$output" -eq 2 ]
+}
+
+@test "the published-port count probe emits a single 0 when nothing is published" {
+  # The zero case is the one the CI run hit, and the one `|| echo 0` prints twice.
+  stub_docker '3000/tcp'
+  run run_forensic_probe "published ports on host" dump_binding_forensics
+  [ "$status" -eq 0 ]
+  [ "$output" = "0" ]
+}
+
+@test "the docker-proxy count probe emits a single integer with no proxy running" {
+  run run_forensic_probe "docker-proxy count" dump_binding_forensics
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c .)" -eq 1 ]
+  [[ "$output" =~ ^[0-9]+$ ]]
+}
+
+@test "binding forensics read the port bindings twice, seconds apart" {
+  # A binding that is absent at t0 and present at t+N is a rule-programming race; one absent at
+  # both is a mapping the daemon never recorded. A single read cannot tell those apart, and they
+  # need opposite fixes -- so the second read is the whole diagnostic value of this dump.
+  src="$BATS_TEST_DIRNAME/../libexec/lane-up"
+  body="$(awk '/^  dump_binding_forensics\(\) \{/,/^  \}/' "$src")"
+  [ "$(printf '%s\n' "$body" | grep -c 'NetworkSettings.Ports')" -ge 2 ]
+  printf '%s\n' "$body" | grep -q 'sleep'
+}
+
+@test "every forensics probe runs a command this runner shape actually provides" {
+  # journalctl and a host-visible dockerd pid do not exist on the self-hosted pool: measured, both
+  # probes returned "unavailable" on every run. A probe that can never produce a value reads as
+  # instrumentation while providing none. Allowlist, not banlist -- a banlist grows one hole per
+  # new probe, and the hole is invisible because the test encodes the same list as the code.
+  src="$BATS_TEST_DIRNAME/../libexec/lane-up"
+  allowed=" docker sh ps free dmesg ss cat sysctl awk sleep "
+  for fn in dump_binding_forensics dump_exit_forensics; do
+    while IFS= read -r line; do
+      cmd="$(printf '%s\n' "$line" | sed -E 's/^[[:space:]]*probe "[^"]*" //' | awk '{print $1}')"
+      [ -n "$cmd" ] || continue
+      [[ "$allowed" == *" $cmd "* ]] || { echo "$fn probes via unavailable command: $cmd"; return 1; }
+    done < <(awk "/^  ${fn}\\(\\) \\{/,/^  \\}/" "$src" | grep -E '^[[:space:]]*probe "')
+  done
+  for fn in dump_binding_forensics dump_exit_forensics; do
+    # Probe lines only. A comment naming journalctl is prose about why it is gone, not a shell-out.
+    probes="$(awk "/^  ${fn}\\(\\) \\{/,/^  \\}/" "$src" | grep -E '^[[:space:]]*probe "')"
+    printf '%s\n' "$probes" | grep -q 'journalctl' && { echo "$fn still probes via journalctl"; return 1; }
+  done
+  return 0
+}
