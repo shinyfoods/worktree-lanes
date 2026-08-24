@@ -9,6 +9,43 @@ wtl_find_config() {
   return 1
 }
 
+# Assert the six non-main port windows are disjoint. Fails closed: a config
+# that would overlap is rejected at load rather than producing lanes that
+# collide only sometimes, on only some slots, in only some pairings.
+wtl_validate_port_bands() {
+  local widest="$WTL_CFG_LOCAL_SLOT_MOD"
+  [ "$WTL_CFG_CI_LANE_SLOT_MOD" -gt "$widest" ] && widest="$WTL_CFG_CI_LANE_SLOT_MOD"
+
+  local specs="backend:$WTL_CFG_NONMAIN_BACKEND_PORT_BASE
+frontend:$WTL_CFG_NONMAIN_FRONTEND_PORT_BASE
+mailhog_ui:$WTL_CFG_NONMAIN_MAILHOG_UI_PORT_BASE
+mailhog_smtp:$WTL_CFG_NONMAIN_MAILHOG_SMTP_PORT_BASE
+postgres:$WTL_CFG_NONMAIN_POSTGRES_PORT_BASE
+redis:$WTL_CFG_NONMAIN_REDIS_PORT_BASE"
+
+  local sorted; sorted="$(printf '%s\n' "$specs" | sort -t: -k2 -n)"
+  local prev_name="" prev_base="" name base gap
+  while IFS=: read -r name base; do
+    [ -z "$name" ] && continue
+    if [ -n "$prev_base" ]; then
+      gap=$(( base - prev_base ))
+      if [ "$gap" -lt "$widest" ]; then
+        printf 'worktree.config: non-main port bases %s (%s) and %s (%s) are %s apart, ' \
+          "$prev_name" "$prev_base" "$name" "$base" "$gap" >&2
+        printf 'but a lane slot spans up to %s.\n' "$widest" >&2
+        printf '  Their port windows overlap, so two concurrent lanes can be assigned the same\n' >&2
+        printf '  host port for different services. Widen the gap to at least %s, or lower\n' "$widest" >&2
+        printf '  WTL_CI_LANE_SLOT_MOD / WTL_LOCAL_SLOT_MOD.\n' >&2
+        return 1
+      fi
+    fi
+    prev_name="$name"; prev_base="$base"
+  done <<EOF
+$sorted
+EOF
+  return 0
+}
+
 wtl_load_config() {
   local cfg; cfg="$(wtl_find_config)" || {
     echo "worktree: no worktree.config found (searched up from $(pwd)). Add one at the repo root." >&2
@@ -41,6 +78,18 @@ wtl_load_config() {
   WTL_CFG_NONMAIN_MAILHOG_SMTP_PORT_BASE="${WTL_NONMAIN_MAILHOG_SMTP_PORT_BASE:-46000}"
   WTL_CFG_NONMAIN_POSTGRES_PORT_BASE="${WTL_NONMAIN_POSTGRES_PORT_BASE:-47000}"
   WTL_CFG_NONMAIN_REDIS_PORT_BASE="${WTL_NONMAIN_REDIS_PORT_BASE:-48000}"
+
+  # Every non-main port is `base + slot`, so a service's ports occupy
+  # [base, base + slot_mod - 1]. If any modulus exceeds the gap between two
+  # bases those windows overlap, and two concurrent lanes can be handed the
+  # same host port for *different* services — a collision that surfaces as a
+  # binding that never appears rather than as an error, because the unit of
+  # failure becomes the port number instead of the service.
+  WTL_CFG_LOCAL_SLOT_MOD="${WTL_LOCAL_SLOT_MOD:-200}"
+  WTL_CFG_CI_LANE_SLOT_MOD="${WTL_CI_LANE_SLOT_MOD:-1000}"
+
+  wtl_validate_port_bands || return 1
+
   WTL_CFG_HAS_FRONTEND="${WTL_HAS_FRONTEND:-0}"
   WTL_CFG_HAS_SIDEKIQ="${WTL_HAS_SIDEKIQ:-0}"
   WTL_CFG_HAS_MAILHOG="${WTL_HAS_MAILHOG:-0}"

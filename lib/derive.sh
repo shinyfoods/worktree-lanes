@@ -109,9 +109,14 @@ wtl_derive() {
   WTL_WORKTREE_ID="${hash:0:8}"
   local slot_hex="${hash:0:6}"
   local slot_dec; slot_dec=$(printf '%d' "0x$slot_hex")
-  local slot_mod=200
+  # Bounded by the gap between adjacent port bases, not by how many lanes we
+  # would like to distinguish: a slot wider than that gap makes one service's
+  # port window overlap the next service's, so two lanes collide on a port
+  # while appearing to use different services. wtl_validate_port_bands()
+  # rejects a config where that holds.
+  local slot_mod="$WTL_CFG_LOCAL_SLOT_MOD"
   if [ -n "$WTL_CI_LANE_KEY" ]; then
-    slot_mod=15000
+    slot_mod="$WTL_CFG_CI_LANE_SLOT_MOD"
   fi
   local slot=$(( slot_dec % slot_mod ))
 
