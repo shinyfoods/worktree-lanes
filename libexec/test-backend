@@ -48,15 +48,23 @@ run_rspec() {
   local test_exit=0
 
   if [ "${WTL_DRYRUN:-0}" = "1" ]; then
-    echo "DRY RUN: docker compose -p $COMPOSE_PROJECT_NAME -f $COMPOSE_FILE run --rm --no-deps -e RAILS_ENV=test ${docker_run_env_flags[*]} backend bundle exec rails db:prepare"
+    echo "DRY RUN: docker compose -p $COMPOSE_PROJECT_NAME -f $COMPOSE_FILE run --rm --no-deps -e RAILS_ENV=test ${docker_run_env_flags[*]} backend bundle exec rails db:test:prepare"
     echo "DRY RUN: docker compose -p $COMPOSE_PROJECT_NAME -f $COMPOSE_FILE run --rm --no-deps -e RAILS_ENV=test ${docker_run_env_flags[*]} backend bundle exec rspec $*"
   else
     wtl_wait_for_postgres_ready "$readiness_project" "$COMPOSE_FILE" postgres "${WTL_POSTGRES_READINESS_TIMEOUT:-90}"
 
+    # db:test:prepare, never db:prepare. `db:prepare` runs `db:seed` whenever it
+    # CREATES the database, and this one is the test database — so on a lane's
+    # first run it plants development seed data in the database the suite is
+    # about to assert against. Whether that is visible depends on the consuming
+    # repo: a seeds file that refuses under RAILS_ENV=test makes `db:prepare`
+    # look harmless, and one that allows it hands every fresh lane a poisoned
+    # test database. `db:test:prepare` loads the schema and never seeds, which
+    # is what a test database wants in either repo.
     docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --no-deps \
       -e RAILS_ENV=test \
       "${docker_run_env_flags[@]}" \
-      backend bundle exec rails db:prepare
+      backend bundle exec rails db:test:prepare
 
     docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" run --rm --no-deps \
       -e RAILS_ENV=test \

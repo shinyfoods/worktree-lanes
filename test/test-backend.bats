@@ -19,7 +19,7 @@ teardown() {
 }
 
 # The fake Docker command models Compose startup, health transitions, and the
-# two backend commands. Its event log makes the readiness-to-db:prepare order
+# two backend commands. Its event log makes the readiness-to-db:test:prepare order
 # observable without requiring a Docker daemon or a Rails image.
 make_fake_docker() {
   EVENTS_FILE="$(mktemp)"
@@ -97,7 +97,7 @@ if [ "${1:-}" = "compose" ]; then
     run)
       for arg in "$@"; do
         case "$arg" in
-          db:prepare) record_event db:prepare ;;
+          db:test:prepare) record_event db:test:prepare ;;
           rspec) record_event rspec ;;
         esac
       done
@@ -122,14 +122,24 @@ FAKE_CURL
   export PATH="$FAKE_BIN:$PATH"
 }
 
-@test "test-backend dry-run prints DATABASE_URL containing _test_ and db:prepare" {
+@test "test-backend dry-run prints DATABASE_URL containing _test_ and db:test:prepare" {
   run env WTL_DRYRUN=1 bash "$BATS_TEST_DIRNAME/../libexec/test-backend"
   [ "$status" -eq 0 ]
   [[ "$output" == *"_test_"* ]]
-  [[ "$output" == *"db:prepare"* ]]
+  [[ "$output" == *"db:test:prepare"* ]]
 }
 
-@test "test-backend readiness regression guard blocks db:prepare until Postgres is healthy" {
+# The negative half. `db:prepare` seeds a database it creates, and this one is
+# the test database, so a revert to it poisons every fresh lane in any repo
+# whose seeds do not refuse RAILS_ENV=test. Asserting the positive alone would
+# still pass if someone ran BOTH commands.
+@test "test-backend never invokes bare db:prepare against the test database" {
+  run env WTL_DRYRUN=1 bash "$BATS_TEST_DIRNAME/../libexec/test-backend"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"rails db:prepare"* ]]
+}
+
+@test "test-backend readiness regression guard blocks db:test:prepare until Postgres is healthy" {
   make_fake_docker starting unhealthy healthy
 
   run env WTL_POSTGRES_READINESS_TIMEOUT=5 bash "$BATS_TEST_DIRNAME/../libexec/test-backend"
@@ -137,26 +147,26 @@ FAKE_CURL
   grep -q '^inspect:starting$' "$EVENTS_FILE"
   grep -q '^inspect:unhealthy$' "$EVENTS_FILE"
   grep -q '^inspect:healthy$' "$EVENTS_FILE"
-  grep -q '^db:prepare$' "$EVENTS_FILE"
+  grep -q '^db:test:prepare$' "$EVENTS_FILE"
 
   healthy_line="$(grep -n '^inspect:healthy$' "$EVENTS_FILE" | head -1 | cut -d: -f1 || true)"
-  prepare_line="$(grep -n '^db:prepare$' "$EVENTS_FILE" | head -1 | cut -d: -f1 || true)"
+  prepare_line="$(grep -n '^db:test:prepare$' "$EVENTS_FILE" | head -1 | cut -d: -f1 || true)"
   [ -n "$healthy_line" ]
   [ -n "$prepare_line" ]
   [ "$healthy_line" -lt "$prepare_line" ]
 }
 
-@test "test-backend healthy Postgres reaches db:prepare and RSpec" {
+@test "test-backend healthy Postgres reaches db:test:prepare and RSpec" {
   make_fake_docker healthy
 
   run env WTL_POSTGRES_READINESS_TIMEOUT=3 bash "$BATS_TEST_DIRNAME/../libexec/test-backend"
   [ "$status" -eq 0 ]
   grep -q '^inspect:healthy$' "$EVENTS_FILE"
-  grep -q '^db:prepare$' "$EVENTS_FILE"
+  grep -q '^db:test:prepare$' "$EVENTS_FILE"
   grep -q '^rspec$' "$EVENTS_FILE"
 
   healthy_line="$(grep -n '^inspect:healthy$' "$EVENTS_FILE" | head -1 | cut -d: -f1 || true)"
-  prepare_line="$(grep -n '^db:prepare$' "$EVENTS_FILE" | head -1 | cut -d: -f1 || true)"
+  prepare_line="$(grep -n '^db:test:prepare$' "$EVENTS_FILE" | head -1 | cut -d: -f1 || true)"
   rspec_line="$(grep -n '^rspec$' "$EVENTS_FILE" | head -1 | cut -d: -f1 || true)"
   [ "$healthy_line" -lt "$prepare_line" ]
   [ "$prepare_line" -lt "$rspec_line" ]
@@ -168,7 +178,7 @@ FAKE_CURL
   run env WTL_POSTGRES_READINESS_TIMEOUT=3 bash "$BATS_TEST_DIRNAME/../libexec/test-backend"
   [ "$status" -eq 0 ]
   grep -q '^inspect:no-healthcheck$' "$EVENTS_FILE"
-  grep -q '^db:prepare$' "$EVENTS_FILE"
+  grep -q '^db:test:prepare$' "$EVENTS_FILE"
   grep -q '^rspec$' "$EVENTS_FILE"
 }
 
@@ -179,10 +189,10 @@ FAKE_CURL
   [ "$status" -eq 0 ]
   [ "$(grep -c '^inspect:healthcheck-pending$' "$EVENTS_FILE")" -ge 2 ]
   grep -q '^inspect:healthy$' "$EVENTS_FILE"
-  grep -q '^db:prepare$' "$EVENTS_FILE"
+  grep -q '^db:test:prepare$' "$EVENTS_FILE"
 }
 
-@test "test-backend shared mode checks the shared Postgres project before db:prepare" {
+@test "test-backend shared mode checks the shared Postgres project before db:test:prepare" {
   printf 'LOCALS_INFRA_MODE=shared\n' >> worktree.config
   make_fake_docker healthy
 
@@ -191,7 +201,7 @@ FAKE_CURL
   [ "$(grep -c '^compose-ps:locals-shared-infra:postgres$' "$EVENTS_FILE")" -ge 2 ]
 
   healthy_line="$(grep -n '^inspect:healthy$' "$EVENTS_FILE" | tail -1 | cut -d: -f1 || true)"
-  prepare_line="$(grep -n '^db:prepare$' "$EVENTS_FILE" | head -1 | cut -d: -f1 || true)"
+  prepare_line="$(grep -n '^db:test:prepare$' "$EVENTS_FILE" | head -1 | cut -d: -f1 || true)"
   [ "$healthy_line" -lt "$prepare_line" ]
 }
 
@@ -204,7 +214,7 @@ FAKE_CURL
   [[ "$output" == *"service 'postgres'"* ]]
   [[ "$output" == *"Recent logs for service 'postgres'"* ]]
   [[ "$output" == *"fake postgres diagnostics"* ]]
-  ! grep -q '^db:prepare$' "$EVENTS_FILE"
+  ! grep -q '^db:test:prepare$' "$EVENTS_FILE"
 }
 
 @test "test-backend rejects a healthy status from a stopped Postgres container" {
@@ -213,5 +223,5 @@ FAKE_CURL
   run env WTL_POSTGRES_READINESS_TIMEOUT=2 bash "$BATS_TEST_DIRNAME/../libexec/test-backend"
   [ "$status" -ne 0 ]
   [[ "$output" == *"last health=healthy, container=exited"* ]]
-  ! grep -q '^db:prepare$' "$EVENTS_FILE"
+  ! grep -q '^db:test:prepare$' "$EVENTS_FILE"
 }
