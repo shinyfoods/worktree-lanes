@@ -96,3 +96,20 @@ $WTL_CFG_NONMAIN_REDIS_PORT_BASE"
     [ "$(highest_port)" -lt 55540 ]
   }
 }
+
+# The numeric guard: without it a non-numeric override surfaces as a raw bash
+# arithmetic error from inside the validator whose job is actionable messages.
+@test "the guard REJECTS a non-numeric slot modulus" {
+  export WTL_CI_LANE_SLOT_MOD=abc
+  run wtl_load_config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must be a positive integer"* ]]
+  [[ "$output" == *"WTL_CFG_CI_LANE_SLOT_MOD"* ]]
+}
+
+@test "the guard REJECTS a zero or negative port base" {
+  export WTL_NONMAIN_REDIS_PORT_BASE=0
+  run wtl_load_config
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must be a positive integer"* ]]
+}

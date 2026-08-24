@@ -13,6 +13,21 @@ wtl_find_config() {
 # that would overlap is rejected at load rather than producing lanes that
 # collide only sometimes, on only some slots, in only some pairings.
 wtl_validate_port_bands() {
+  # Check numerics first: every comparison below is arithmetic, and a
+  # non-numeric override would otherwise surface as a raw bash error from
+  # inside a validator whose whole job is to produce actionable ones.
+  local _n _v
+  for _n in WTL_CFG_LOCAL_SLOT_MOD WTL_CFG_CI_LANE_SLOT_MOD \
+            WTL_CFG_NONMAIN_BACKEND_PORT_BASE WTL_CFG_NONMAIN_FRONTEND_PORT_BASE \
+            WTL_CFG_NONMAIN_MAILHOG_UI_PORT_BASE WTL_CFG_NONMAIN_MAILHOG_SMTP_PORT_BASE \
+            WTL_CFG_NONMAIN_POSTGRES_PORT_BASE WTL_CFG_NONMAIN_REDIS_PORT_BASE; do
+    _v="${!_n:-}"
+    if [[ ! "$_v" =~ ^[0-9]+$ ]] || [ "$_v" -le 0 ]; then
+      printf 'worktree.config: %s must be a positive integer (got: %s)\n' "$_n" "$_v" >&2
+      return 1
+    fi
+  done
+
   local widest="$WTL_CFG_LOCAL_SLOT_MOD"
   [ "$WTL_CFG_CI_LANE_SLOT_MOD" -gt "$widest" ] && widest="$WTL_CFG_CI_LANE_SLOT_MOD"
 
