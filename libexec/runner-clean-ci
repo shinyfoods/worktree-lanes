@@ -36,6 +36,10 @@ COMPOSE_FILE="$WTL_COMPOSE_FILE"
 APPLY=0
 INCLUDE_RUNNING=0
 MAX_AGE_MINUTES=""
+# A floor, not a budget. Anything newer than this is left alone by a sweep,
+# because a compose project that young cannot be distinguished from one that is
+# mid-startup — and getting that wrong kills a live job.
+MIN_AGE_MINUTES="${WTL_JANITOR_MIN_AGE_MINUTES:-5}"
 PREFIX="${WTL_PROJECT}-ci-"
 PROJECT=""
 
@@ -44,6 +48,7 @@ while [ $# -gt 0 ]; do
     --apply) APPLY=1 ;;
     --include-running) INCLUDE_RUNNING=1 ;;
     --max-age=*) MAX_AGE_MINUTES="${1#*=}" ;;
+    --min-age=*) MIN_AGE_MINUTES="${1#*=}" ;;
     --prefix=*) PREFIX="${1#*=}" ;;
     --project=*) PROJECT="${1#*=}" ;;
     -h|--help)
@@ -57,6 +62,12 @@ Defaults:
   - Only cleans projects with no running containers (unless --include-running or --max-age)
 
 Options:
+  --min-age=MINUTES   Never clean a project with ANY container newer than MINUTES (default 5).
+                      A sweep cannot tell a project that is starting from one that is finished:
+                      a compose-run project holds one container that reports as not-running
+                      between Created and Started, and cleaning it there removes the network out
+                      from under a live command. Ignored for an explicit --project or
+                      --include-running, which are deliberate.
   --max-age=MINUTES   Treat projects with ALL containers older than MINUTES as stale and
                       eligible for cleanup, even if they have running containers. This
                       catches leaked stacks from cancelled/timed-out CI jobs. Projects
@@ -108,6 +119,41 @@ project_is_stale() {
   return 0  # All containers are older than max-age
 }
 
+# Returns 0 (true) if ANY container in the project was created within
+# MIN_AGE_MINUTES. A project that young is either starting up or actively running
+# a one-shot command, and either way it is not garbage.
+#
+# WHY THIS EXISTS. The running-container check below is not a liveness test. A
+# `docker compose run` project — every `worktree run-backend` / `test-backend`
+# invocation in CI — holds exactly one container, and that container reports as
+# NOT running for the moment between `Created` and `Started`. During that moment a
+# sibling job's janitor saw zero running containers, called the project dead, and
+# removed its network out from under a live command:
+#
+#   Error response from daemon: failed to set up container networking:
+#     network <project>_default not found
+#
+# `--max-age` did not help, because it is only consulted for projects that DO
+# have running containers — exactly the ones least at risk.
+project_is_young() {
+  local project="$1"
+  local min_age="$2"
+  local now_epoch cutoff created_times container_epoch
+  now_epoch=$(date +%s)
+  cutoff=$((now_epoch - min_age * 60))
+
+  created_times=$(docker ps -a --filter "label=com.docker.compose.project=${project}" --format '{{.CreatedAt}}' 2>/dev/null) || return 1
+  [ -n "$created_times" ] || return 1
+
+  while IFS= read -r ts; do
+    container_epoch=$(date -d "$ts" +%s 2>/dev/null || date -j -f "%Y-%m-%d %H:%M:%S %z" "$ts" +%s 2>/dev/null) || continue
+    if [ "$container_epoch" -gt "$cutoff" ]; then
+      return 0  # something here is younger than the floor
+    fi
+  done <<< "$created_times"
+  return 1
+}
+
 collect_projects() {
   {
     docker ps -a --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null || true
@@ -120,22 +166,32 @@ remove_labeled_resources() {
   local project="$1"
   local failed_local=0
 
+  # `mapfile` is bash 4+. macOS ships bash 3.2, where it is not a builtin and not
+  # on PATH, so every one of these lines died with "mapfile: command not found"
+  # followed by an unbound-variable abort — on the very path an operator running
+  # this by hand reaches. Read into the array instead; it is portable and does the
+  # same thing for ids, which never contain whitespace.
+  local ids
+
   # Remove orphaned containers first (if any remain for this project).
-  mapfile -t cids < <(docker ps -a --filter "label=com.docker.compose.project=${project}" -q)
-  if [ "${#cids[@]}" -gt 0 ]; then
-    docker rm -f "${cids[@]}" >/dev/null 2>&1 || failed_local=1
+  ids="$(docker ps -a --filter "label=com.docker.compose.project=${project}" -q 2>/dev/null)"
+  if [ -n "$ids" ]; then
+    # shellcheck disable=SC2086  # deliberate word splitting: one id per argument
+    docker rm -f $ids >/dev/null 2>&1 || failed_local=1
   fi
 
   # Then remove project networks and volumes by label. These are the common
   # sources of leaked state that accumulate on self-hosted CI runners.
-  mapfile -t nets < <(docker network ls --filter "label=com.docker.compose.project=${project}" -q)
-  if [ "${#nets[@]}" -gt 0 ]; then
-    docker network rm "${nets[@]}" >/dev/null 2>&1 || failed_local=1
+  ids="$(docker network ls --filter "label=com.docker.compose.project=${project}" -q 2>/dev/null)"
+  if [ -n "$ids" ]; then
+    # shellcheck disable=SC2086
+    docker network rm $ids >/dev/null 2>&1 || failed_local=1
   fi
 
-  mapfile -t vols < <(docker volume ls --filter "label=com.docker.compose.project=${project}" -q)
-  if [ "${#vols[@]}" -gt 0 ]; then
-    docker volume rm "${vols[@]}" >/dev/null 2>&1 || failed_local=1
+  ids="$(docker volume ls --filter "label=com.docker.compose.project=${project}" -q 2>/dev/null)"
+  if [ -n "$ids" ]; then
+    # shellcheck disable=SC2086
+    docker volume rm $ids >/dev/null 2>&1 || failed_local=1
   fi
 
   return "$failed_local"
@@ -173,6 +229,7 @@ echo
 
 cleaned=0
 skipped_running=0
+skipped_young=0
 failed=0
 
 lock_fd_open=0
@@ -188,6 +245,17 @@ fi
 for project in "${projects[@]}"; do
   running_count=$(docker ps --filter "label=com.docker.compose.project=${project}" -q | wc -l | tr -d ' ')
   total_count=$(docker ps -a --filter "label=com.docker.compose.project=${project}" -q | wc -l | tr -d ' ')
+
+  # Checked FIRST, and for every project regardless of whether anything is
+  # running. An explicit --project= or --include-running is a deliberate "clean
+  # this now" and is exempt; a sweep is not.
+  if [ -z "$PROJECT" ] && [ "$INCLUDE_RUNNING" -ne 1 ] && [ "$MIN_AGE_MINUTES" -gt 0 ] \
+    && project_is_young "$project" "$MIN_AGE_MINUTES"; then
+    echo "YOUNG $project (running: $running_count, total: $total_count, newer than ${MIN_AGE_MINUTES}m — may be starting)"
+    skipped_young=$((skipped_young + 1))
+    continue
+  fi
+
   if [ "$running_count" -gt 0 ] && [ "$INCLUDE_RUNNING" -ne 1 ]; then
     # If --max-age is set, check whether ALL containers are older than the threshold.
     # Stale projects from cancelled/timed-out jobs are eligible for cleanup.
@@ -231,6 +299,7 @@ echo "Summary:"
 echo "  projects_found: ${#projects[@]}"
 echo "  cleaned:         $cleaned"
 echo "  skipped_running: $skipped_running"
+echo "  skipped_young:   $skipped_young"
 echo "  failed:          $failed"
 
 [ "$failed" -eq 0 ] || exit 1
