@@ -68,11 +68,12 @@ Options:
                       between Created and Started, and cleaning it there removes the network out
                       from under a live command. Ignored for an explicit --project or
                       --include-running, which are deliberate.
-  --max-age=MINUTES   Treat projects with ALL containers older than MINUTES as stale and
-                      eligible for cleanup, even if they have running containers. This
-                      catches leaked stacks from cancelled/timed-out CI jobs. Projects
-                      with containers younger than MINUTES are still subject to the normal
-                      --include-running check.
+  --max-age=MINUTES   Treat a project whose NEWEST container is older than MINUTES as stale
+                      and reap it regardless of RUNNING state. This is what catches a stack
+                      stranded by a job that was cancelled or killed before its teardown
+                      ran. Set it above the longest legitimate job on the host, or it will
+                      reap live work. Projects younger than MINUTES are still subject to
+                      the normal --include-running check.
 
 Examples:
   worktree runner-clean-ci
@@ -96,62 +97,47 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-# Returns 0 (true) if ALL containers in the project are older than MAX_AGE_MINUTES.
-# Returns 1 (false) if any container is younger or if age can't be determined.
-project_is_stale() {
-  local project="$1"
-  local max_age="$2"
-  local now_epoch
-  now_epoch=$(date +%s)
-  local cutoff=$((now_epoch - max_age * 60))
-
-  local created_times
-  created_times=$(docker ps -a --filter "label=com.docker.compose.project=${project}" --format '{{.CreatedAt}}' 2>/dev/null) || return 1
-  [ -n "$created_times" ] || return 1
-
-  while IFS= read -r ts; do
-    local container_epoch
-    container_epoch=$(date -d "$ts" +%s 2>/dev/null || date -j -f "%Y-%m-%d %H:%M:%S %z" "$ts" +%s 2>/dev/null) || return 1
-    if [ "$container_epoch" -gt "$cutoff" ]; then
-      return 1  # At least one container is too young
-    fi
-  done <<< "$created_times"
-  return 0  # All containers are older than max-age
+# Docker's `{{.CreatedAt}}` is Go's layout `2006-01-02 15:04:05 -0700 MST`: a
+# numeric offset AND a trailing zone abbreviation. GNU date — the one on a Linux
+# CI runner — rejects the whole string because of that abbreviation, and the BSD
+# form does not exist there, so both arms of the old two-arm parse failed and
+# every age check silently answered "no". Dropping the abbreviation leaves a
+# string both implementations accept. Prints the epoch; returns 1 when the
+# timestamp cannot be read.
+parse_docker_timestamp() {
+  local ts="$1" d t z rest epoch
+  read -r d t z rest <<< "$ts"
+  [ -n "$d" ] && [ -n "$t" ] && [ -n "$z" ] || return 1
+  epoch=$(date -d "$d $t $z" +%s 2>/dev/null || date -j -f "%Y-%m-%d %H:%M:%S %z" "$d $t $z" +%s 2>/dev/null) || return 1
+  [ -n "$epoch" ] || return 1
+  printf '%s' "$epoch"
 }
 
-# Returns 0 (true) if ANY container in the project was created within
-# MIN_AGE_MINUTES. A project that young is either starting up or actively running
-# a one-shot command, and either way it is not garbage.
+# Prints the creation epoch of the project's NEWEST container. Both age
+# questions are questions about that one number: the floor asks whether it is
+# too recent to touch, the ceiling whether even it is old enough to reap.
 #
-# WHY THIS EXISTS. The running-container check below is not a liveness test. A
-# `docker compose run` project — every `worktree run-backend` / `test-backend`
-# invocation in CI — holds exactly one container, and that container reports as
-# NOT running for the moment between `Created` and `Started`. During that moment a
-# sibling job's janitor saw zero running containers, called the project dead, and
-# removed its network out from under a live command:
-#
-#   Error response from daemon: failed to set up container networking:
-#     network <project>_default not found
-#
-# `--max-age` did not help, because it is only consulted for projects that DO
-# have running containers — exactly the ones least at risk.
-project_is_young() {
-  local project="$1"
-  local min_age="$2"
-  local now_epoch cutoff created_times container_epoch
-  now_epoch=$(date +%s)
-  cutoff=$((now_epoch - min_age * 60))
-
-  created_times=$(docker ps -a --filter "label=com.docker.compose.project=${project}" --format '{{.CreatedAt}}' 2>/dev/null) || return 1
-  [ -n "$created_times" ] || return 1
+# Return codes are distinguished on purpose, because the two failure shapes call
+# for opposite treatment:
+#   1  the project has containers but an age could not be read — an unreadable
+#      age is not an age, and must never be allowed to read as "old enough"
+#   2  the project has no containers at all, only leaked networks or volumes,
+#      which is garbage by definition and has no age to reason about
+project_newest_epoch() {
+  local project="$1" created_times ts epoch newest=""
+  created_times=$(docker ps -a --filter "label=com.docker.compose.project=${project}" --format '{{.CreatedAt}}' 2>/dev/null) || return 2
+  [ -n "$created_times" ] || return 2
 
   while IFS= read -r ts; do
-    container_epoch=$(date -d "$ts" +%s 2>/dev/null || date -j -f "%Y-%m-%d %H:%M:%S %z" "$ts" +%s 2>/dev/null) || continue
-    if [ "$container_epoch" -gt "$cutoff" ]; then
-      return 0  # something here is younger than the floor
+    [ -n "$ts" ] || continue
+    epoch=$(parse_docker_timestamp "$ts") || return 1
+    if [ -z "$newest" ] || [ "$epoch" -gt "$newest" ]; then
+      newest="$epoch"
     fi
   done <<< "$created_times"
-  return 1
+
+  [ -n "$newest" ] || return 2
+  printf '%s' "$newest"
 }
 
 collect_projects() {
@@ -224,12 +210,13 @@ if [ -n "$PROJECT" ]; then
 else
   echo "Prefix: $PREFIX"
 fi
-[ -z "$MAX_AGE_MINUTES" ] || echo "Max age: ${MAX_AGE_MINUTES}m (running projects older than this are eligible for cleanup)"
+[ -z "$MAX_AGE_MINUTES" ] || echo "Max age: ${MAX_AGE_MINUTES}m (projects whose newest container is older than this are reaped, running or not)"
 echo
 
 cleaned=0
 skipped_running=0
 skipped_young=0
+undetermined=0
 failed=0
 
 lock_fd_open=0
@@ -246,26 +233,37 @@ for project in "${projects[@]}"; do
   running_count=$(docker ps --filter "label=com.docker.compose.project=${project}" -q | wc -l | tr -d ' ')
   total_count=$(docker ps -a --filter "label=com.docker.compose.project=${project}" -q | wc -l | tr -d ' ')
 
+  age_rc=0
+  newest_epoch=$(project_newest_epoch "$project") || age_rc=$?
+  now_epoch=$(date +%s)
+
+  # A project whose age cannot be read is left alone AND reported, rather than
+  # falling through as "not young, not stale" — that silence is how a janitor
+  # stops working without anyone noticing. The non-zero exit below is what
+  # carries it to the daily health check.
+  if [ "$age_rc" -eq 1 ]; then
+    echo "AGE?  $project (running: $running_count, total: $total_count, container age unreadable — not reaping)" >&2
+    undetermined=$((undetermined + 1))
+    continue
+  fi
+
   # Checked FIRST, and for every project regardless of whether anything is
   # running. An explicit --project= or --include-running is a deliberate "clean
   # this now" and is exempt; a sweep is not.
   if [ -z "$PROJECT" ] && [ "$INCLUDE_RUNNING" -ne 1 ] && [ "$MIN_AGE_MINUTES" -gt 0 ] \
-    && project_is_young "$project" "$MIN_AGE_MINUTES"; then
+    && [ "$age_rc" -eq 0 ] && [ "$newest_epoch" -gt $((now_epoch - MIN_AGE_MINUTES * 60)) ]; then
     echo "YOUNG $project (running: $running_count, total: $total_count, newer than ${MIN_AGE_MINUTES}m — may be starting)"
     skipped_young=$((skipped_young + 1))
     continue
   fi
 
-  if [ "$running_count" -gt 0 ] && [ "$INCLUDE_RUNNING" -ne 1 ]; then
-    # If --max-age is set, check whether ALL containers are older than the threshold.
-    # Stale projects from cancelled/timed-out jobs are eligible for cleanup.
-    if [ -n "$MAX_AGE_MINUTES" ] && project_is_stale "$project" "$MAX_AGE_MINUTES"; then
-      echo "STALE $project (running: $running_count, total: $total_count, all containers older than ${MAX_AGE_MINUTES}m)"
-    else
-      echo "SKIP  $project (running containers: $running_count, total: $total_count)"
-      skipped_running=$((skipped_running + 1))
-      continue
-    fi
+  if [ -n "$MAX_AGE_MINUTES" ] && [ "$age_rc" -eq 0 ] \
+    && [ "$newest_epoch" -le $((now_epoch - MAX_AGE_MINUTES * 60)) ]; then
+    echo "STALE $project (running: $running_count, total: $total_count, newest container older than ${MAX_AGE_MINUTES}m)"
+  elif [ "$running_count" -gt 0 ] && [ "$INCLUDE_RUNNING" -ne 1 ]; then
+    echo "SKIP  $project (running containers: $running_count, total: $total_count)"
+    skipped_running=$((skipped_running + 1))
+    continue
   fi
 
   if [ "$APPLY" -eq 1 ]; then
@@ -300,6 +298,7 @@ echo "  projects_found: ${#projects[@]}"
 echo "  cleaned:         $cleaned"
 echo "  skipped_running: $skipped_running"
 echo "  skipped_young:   $skipped_young"
+echo "  undetermined:    $undetermined"
 echo "  failed:          $failed"
 
-[ "$failed" -eq 0 ] || exit 1
+[ "$failed" -eq 0 ] && [ "$undetermined" -eq 0 ] || exit 1
