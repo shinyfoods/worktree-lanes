@@ -8,15 +8,27 @@ set -euo pipefail
 
 WITH_SIDEKIQ=1
 DETACH=0
+ATTACH=0
 BUILD_MODE=""
 for arg in "$@"; do
   case "$arg" in
     --no-sidekiq) WITH_SIDEKIQ=0 ;;
     -d|--detach) DETACH=1 ;;
+    -a|--attach) ATTACH=1 ;;
     --build) BUILD_MODE="--build" ;;
     --no-build) BUILD_MODE="--no-build" ;;
   esac
 done
+
+# Streaming compose logs is the interactive default, as with `docker compose up`. A caller
+# with no terminal — a script, an agent, a CI step that forgot --detach — has nobody to read
+# the stream and nobody to press Ctrl-C, so an attached bring-up never returns and the
+# caller waits on an exit that cannot come. Without a terminal the lane comes up detached
+# and the bounded readiness wait below is the answer; --attach forces the stream anyway.
+if [ "$DETACH" -eq 0 ] && [ "$ATTACH" -eq 0 ] && ! { [ -t 0 ] && [ -t 1 ]; }; then
+  echo "lane-up: no terminal on stdin and stdout, so the lane comes up detached (pass --attach to stream logs)." >&2
+  DETACH=1
+fi
 
 wtl_load_env --infra-mode=isolated
 if ! docker compose -p "$COMPOSE_PROJECT_NAME" -f "$COMPOSE_FILE" ps -q | grep -q .; then
