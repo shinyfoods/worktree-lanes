@@ -74,7 +74,7 @@ DBs, ports, and Docker Compose project — so worktrees never collide.
 |---|---|
 | `worktree env [--shell\|--json\|--plain] [--check-ports] [--infra-mode=isolated\|shared]` | Emit this worktree's identity as env vars: both project-prefixed (`${PREFIX}_*`, for `docker-compose.yml`/CI) and neutral `WTL_*` (for the CLI's own scripts). |
 | `worktree test-backend [rspec/test args]` | Run the backend suite in a container against this worktree's test DB. |
-| `worktree lane-up / lane-down / lane-reset / lane-status / lane-logs / lane-ports` | Bring an isolated Compose lane (per-worktree containers) up/down and inspect it. |
+| `worktree lane-up [-d\|--detach\|-a\|--attach] [--build\|--no-build] [--no-sidekiq]` / `lane-down` / `lane-reset` / `lane-status` / `lane-logs` / `lane-ports` | Bring an isolated Compose lane (per-worktree containers) up/down and inspect it. `lane-up` streams logs when run from a terminal and comes up detached, with a bounded readiness wait, when it has none (a script, an agent, CI); `--attach` forces the stream. |
 | `worktree up-/stop-/logs-/run-{backend,frontend,sidekiq}`, `status-frontend`, `up-frontend-container` | Per-service control within a lane. |
 | `worktree shared-infra-{up,down,status}` | Optional shared-infra mode (one Postgres/Redis for all lanes). |
 | `worktree bootstrap`, `worktree sync-gems` | Setup helpers. |
